@@ -3,6 +3,7 @@ import { openPdf } from './pdf.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
 import { FilterPanel, toGL, toSvgValues, isIdentity } from './filters.js';
+import { imageRects, darken, loadDarkSetting, saveDarkSetting, DARK_BG } from './darkpage.js';
 import { esc, sheet, toast } from './ui.js';
 
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
@@ -48,6 +49,10 @@ export class Reader {
       this.el.fallback.hidden = false;
     }
     this._bind();
+    this.darkPages = loadDarkSetting();
+    this.el.darkBtn = this.root.querySelector('[data-action="dark"]');
+    this.el.darkBtn.onclick = () => this.setDarkPages(!this.darkPages);
+    this._syncDark();
     this.filterPanel = new FilterPanel(
       this.root.querySelector('.filter-panel'),
       this.root.querySelector('[data-action="filter"]'),
@@ -97,6 +102,34 @@ export class Reader {
     this.cache.clear();
     const lose = this.renderer?.gl.getExtension('WEBGL_lose_context');
     lose?.loseContext();
+  }
+
+  // ---------------------------------------------------------------- dark pages
+  /** Dark mode for every book: recolors page background and text, never images. */
+  setDarkPages(on) {
+    this.darkPages = on;
+    saveDarkSetting(on);
+    this._syncDark();
+    if (!this.doc) return;
+    // Re-render; the current pages stay on screen until their replacements are ready.
+    this.generation++;
+    this.queued.clear();
+    for (const n of this.visiblePages()) this._render(n).then(() => this._draw());
+    this._prefetch();
+  }
+
+  _syncDark() {
+    this.root.classList.toggle('book-dark', this.darkPages);
+    this.el.darkBtn.setAttribute('aria-pressed', String(this.darkPages));
+    this.el.darkBtn.title = this.darkPages ? 'Light pages' : 'Dark pages';
+    if (this.renderer && this.dev) this._layout(); // picks up the new background colors
+    this._draw();
+  }
+
+  /** Cached render of page n in the current mode, if any. */
+  _fresh(n) {
+    const c = this.cache.get(n);
+    return c && c.__dark === this.darkPages ? c : null;
   }
 
   // ---------------------------------------------------------------- color filter
@@ -178,7 +211,8 @@ export class Reader {
       this.el.canvas.width = Math.round(W * scale);
       this.el.canvas.height = Math.round(H * scale);
       const bg = getComputedStyle(this.root).backgroundColor.match(/\d+(\.\d+)?/g)?.map(Number) || [239, 239, 239];
-      this.renderer.setColors(bg.slice(0, 3).map((v) => v / 255), [0.985, 0.98, 0.97]);
+      const paper = this.darkPages ? DARK_BG.map((v) => v / 255) : [0.985, 0.98, 0.97];
+      this.renderer.setColors(bg.slice(0, 3).map((v) => v / 255), paper);
     } else {
       Object.assign(this.el.fallback.style, { left: `${this.css.x}px`, width: `${pw}px`, height: `${ph}px` });
     }
@@ -233,28 +267,38 @@ export class Reader {
   // ---------------------------------------------------------------- rendering
   _render(n) {
     if (n < 1 || n > this.numPages) return Promise.resolve(null);
-    if (this.cache.has(n)) return Promise.resolve(this.cache.get(n));
+    if (this._fresh(n)) return Promise.resolve(this._fresh(n));
     const gen = this.generation;
+    const dark = this.darkPages;
     const job = async () => {
       if (this.destroyed || gen !== this.generation) return null;
-      if (this.cache.has(n)) return this.cache.get(n);
+      if (this._fresh(n)) return this._fresh(n);
       if (!this._inWindow(n)) { this.queued.delete(n); return null; }
       const { w, h } = this.dev;
       const page = await this.doc.getPage(n);
       const base = page.getViewport({ scale: 1 });
       const scale = Math.min(w / base.width, h / base.height);
       const viewport = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
+      let canvas = document.createElement('canvas');
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
-      await page.render({
-        canvasContext: ctx,
-        viewport,
-        transform: [1, 0, 0, 1, (w - viewport.width) / 2, (h - viewport.height) / 2],
-      }).promise;
+      const offset = [1, 0, 0, 1, (w - viewport.width) / 2, (h - viewport.height) / 2];
+      await page.render({ canvasContext: ctx, viewport, transform: offset }).promise;
+      if (dark) {
+        let rects = [];
+        try {
+          const v = viewport.transform;
+          const base = [v[0], v[1], v[2], v[3], v[4] + offset[4], v[5] + offset[5]];
+          rects = await imageRects(page, base);
+        } catch (e) {
+          console.warn('Could not locate images on page', n, e);
+        }
+        canvas = darken(canvas, rects);
+      }
+      canvas.__dark = dark;
       page.cleanup();
       this.queued.delete(n);
       if (this.destroyed || gen !== this.generation) return null;
@@ -295,7 +339,7 @@ export class Reader {
     const { L, R } = this._pages();
     const order = this.spread ? [L, R, R + 1, R + 2, L - 1, L - 2] : [this.page, this.page + 1, this.page - 1, this.page + 2];
     for (const n of order) {
-      if (n >= 1 && n <= this.numPages && !this.cache.has(n) && !this.queued.has(n)) {
+      if (n >= 1 && n <= this.numPages && !this._fresh(n) && !this.queued.has(n)) {
         this._render(n).then(() => this._draw());
       }
     }
@@ -440,7 +484,7 @@ export class Reader {
     if (changed) this.narrator?.pageChanged();
     this._updateChrome();
     this._evict();
-    if (this.cache.has(n)) this._draw();
+    if (this._fresh(n)) this._draw();
     else this._render(n).then(() => this._draw());
     if (!fromTurn) this._draw();
     this._prefetch();

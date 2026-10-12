@@ -341,3 +341,8 @@ button { cursor: pointer; }
 .color-pick input { width: 34px; height: 28px; border: 0; padding: 0; background: none; }
 .icon-btn.has-filter { position: relative; }
 .icon-btn.has-filter::after { content: ""; position: absolute; top: 7px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+/* ---------- dark pages ---------- */
+.reader.book-dark { --reader-bg: #0c0c0d; }
+.reader.book-dark .tts-highlight > div { mix-blend-mode: screen; background: rgba(3, 195, 90, .32); }
+.icon-btn[data-action="dark"][aria-pressed="true"] svg path { fill: currentColor; }
