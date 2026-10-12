@@ -113,10 +113,12 @@ export class Reader {
     let pw;
     let ph;
     if (this.spread) {
-      // The spread fills the full width of the screen; if that makes it taller than the
-      // screen, it scrolls vertically.
-      pw = W / 2;
+      // As large as possible while the whole spread stays on screen, with a slim margin.
+      // (If a forced spread is ever taller than the screen, it scrolls vertically.)
+      const m = 10;
+      pw = (W - m * 2) / 2;
       ph = pw / aspect;
+      if (ph > H - m * 2) { ph = H - m * 2; pw = ph * aspect; }
     } else {
       pw = W - mx * 2;
       ph = pw / aspect;
