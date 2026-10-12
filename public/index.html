@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Bindr</title>
+  <meta name="description" content="Bindr: your PDF library in the cloud, with page turns that feel like paper.">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="/icons/icon-64.png">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Bindr">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="stylesheet" href="/css/app.css">
+  <link rel="modulepreload" href="/js/app.js">
+</head>
+<body>
+  <div id="app">
+    <div class="splash"><img src="/icons/icon-192.png" alt="" width="72" height="72"></div>
+  </div>
+
+  <!-- Auth -->
+  <template id="tpl-auth">
+    <main class="auth">
+      <div class="auth-card">
+        <img class="auth-logo" src="/icons/icon-192.png" alt="" width="84" height="84">
+        <h1>Bindr</h1>
+        <p class="auth-sub">Your books, everywhere.</p>
+        <div class="seg" role="tablist">
+          <button type="button" class="seg-btn active" data-mode="login" role="tab">Sign in</button>
+          <button type="button" class="seg-btn" data-mode="register" role="tab">Create account</button>
+        </div>
+        <form class="auth-form" novalidate>
+          <label class="field only-register" hidden>
+            <span>Name</span>
+            <input name="name" autocomplete="name" maxlength="80" placeholder="Your name">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="email" required placeholder="you@example.com">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters">
+          </label>
+          <p class="form-error" role="alert"></p>
+          <button class="btn primary block" type="submit">Sign in</button>
+        </form>
+      </div>
+    </main>
+  </template>
+
+  <!-- Library -->
+  <template id="tpl-library">
+    <div class="library">
+      <header class="lib-header">
+        <div class="lib-header-inner">
+          <h1>Library</h1>
+          <div class="lib-actions">
+            <button class="icon-btn" data-action="upload" aria-label="Add books" title="Add books">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg>
+            </button>
+            <button class="avatar" data-action="account" aria-label="Account" title="Account"></button>
+          </div>
+        </div>
+        <div class="lib-tools">
+          <div class="search">
+            <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <input type="search" placeholder="Search your library" aria-label="Search your library">
+          </div>
+          <select class="sort" aria-label="Sort">
+            <option value="recent">Recent</option>
+            <option value="title">Title</option>
+            <option value="author">Author</option>
+            <option value="added">Date added</option>
+          </select>
+        </div>
+      </header>
+      <section class="continue" hidden>
+        <h2>Continue Reading</h2>
+        <div class="continue-card"></div>
+      </section>
+      <section class="shelf">
+        <h2 class="shelf-title">All Books</h2>
+        <div class="grid"></div>
+        <div class="empty" hidden>
+          <img src="/icons/glyph-256.png" alt="" width="72" height="72">
+          <h2>Your library is empty</h2>
+          <p>Add a PDF and it will be saved to your account, ready on every device.</p>
+          <button class="btn primary" data-action="upload">Add a Book</button>
+        </div>
+      </section>
+      <input type="file" class="file-input" accept="application/pdf,.pdf" multiple hidden>
+      <div class="drop-overlay" hidden><div>Drop PDFs to add them to your library</div></div>
+    </div>
+  </template>
+
+  <!-- Reader -->
+  <template id="tpl-reader">
+    <div class="reader">
+      <div class="stage">
+        <canvas class="curl-canvas"></canvas>
+        <div class="fallback-page" hidden></div>
+        <div class="reader-loading"><div class="spinner"></div><p>Opening book…</p></div>
+      </div>
+      <header class="reader-bar top">
+        <button class="icon-btn" data-action="close" aria-label="Back to library">
+          <svg viewBox="0 0 24 24" width="24" height="24"><path d="m15 5-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+        </button>
+        <div class="reader-title"></div>
+        <button class="icon-btn" data-action="goto" aria-label="Go to page">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+        </button>
+      </header>
+      <footer class="reader-bar bottom">
+        <input class="scrubber" type="range" min="1" max="1" value="1" aria-label="Page">
+        <div class="page-label"></div>
+      </footer>
+    </div>
+  </template>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
