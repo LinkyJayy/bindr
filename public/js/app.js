@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { inspectPdf } from './pdf.js';
 import { Reader } from './reader.js';
 import { esc, sheet, menu, confirmSheet, toast } from './ui.js';
-import { starsHtml, fmtRating, reviewSheet, publishSheet, publishFieldsHtml, readPublishFields } from './social.js';
+import { starsHtml, fmtRating, reviewSheet } from './social.js';
 
 const app = document.getElementById('app');
 const tpl = (id) => document.getElementById(id).content.firstElementChild.cloneNode(true);
@@ -13,9 +13,6 @@ const state = {
   query: '',
   sort: localStorage.getItem('bindr:sort') || 'recent',
   uploads: [], // in-flight uploads: {key, title, author, coverUrl, progress}
-  storeQuery: '',
-  storeSort: localStorage.getItem('bindr:store-sort') || 'new',
-  storeItems: null,
   reader: null,
 };
 
@@ -50,19 +47,7 @@ function route() {
     if (book) return showReader(book);
     history.replaceState(null, '', '/');
   }
-  if (location.pathname === '/store') return showStore();
   showLibrary();
-}
-
-/** Library / Book Store tabs and the account button, shared by both views. */
-function bindHeader(view) {
-  const avatar = view.querySelector('.avatar');
-  avatar.textContent = (state.user.name || state.user.email || '?').trim()[0].toUpperCase();
-  avatar.onclick = accountSheet;
-  view.querySelectorAll('.tab').forEach((a) => (a.onclick = (e) => {
-    e.preventDefault();
-    navigate(a.getAttribute('href'));
-  }));
 }
 
 let pushedReader = false;
@@ -158,9 +143,11 @@ function showLibrary() {
   if (!state.user) return showAuth();
   document.title = 'Library · Bindr';
   libView = tpl('tpl-library');
-  storeView = null;
   app.replaceChildren(libView);
-  bindHeader(libView);
+
+  const avatar = libView.querySelector('.avatar');
+  avatar.textContent = (state.user.name || state.user.email || '?').trim()[0].toUpperCase();
+  avatar.onclick = accountSheet;
 
   const fileInput = libView.querySelector('.file-input');
   libView.querySelectorAll('[data-action="upload"]').forEach((b) => (b.onclick = () => fileInput.click()));
@@ -257,7 +244,7 @@ function renderShelf() {
         <div class="book-text">
           <div class="book-title" title="${esc(b.title)}">${esc(b.title)}</div>
           <div class="book-sub">${sub}${b.author ? ` · ${esc(b.author)}` : ''}</div>
-          ${b.rating || b.published ? `<div class="book-meta">${b.rating ? `${starsHtml(b.rating, 11)}<span>${fmtRating(b.rating)}</span>` : ''}${b.published ? '<span class="pub-badge" title="Public in the Book Store">Public</span>' : ''}</div>` : ''}
+          ${b.rating ? `<div class="book-meta">${starsHtml(b.rating, 11)}<span>${fmtRating(b.rating)}</span></div>` : ''}
         </div>
         <button class="more" aria-label="More options for ${esc(b.title)}">
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>
@@ -333,7 +320,6 @@ async function bookMenu(book) {
   const choice = await menu(book.title, [
     { label: 'Read', value: 'read' },
     { label: book.rating ? `Rate & Review (${fmtRating(book.rating)} ★)` : 'Rate & Review', value: 'rate' },
-    { label: `Book Store: ${book.published ? 'Public' : book.storeId ? 'From the Book Store' : 'Private'}…`, value: 'publish' },
     { label: 'Rename / Edit Details', value: 'rename' },
     { label: 'Mark as Unread', value: 'reset' },
     { label: 'Remove from Library', value: 'delete', danger: true },
@@ -341,10 +327,6 @@ async function bookMenu(book) {
   if (choice === 'read') navigate(`/read/${book.id}`);
   if (choice === 'rename') renameBook(book);
   if (choice === 'rate') rateBook(book);
-  if (choice === 'publish') {
-    const updated = await publishSheet(book, state.user);
-    if (updated) { replaceBook(updated); renderShelf(); }
-  }
   if (choice === 'reset') {
     try {
       replaceBook((await api.updateBook(book.id, { reset: true })).book);
@@ -352,7 +334,7 @@ async function bookMenu(book) {
     } catch (e) { toast(e.message); }
   }
   if (choice === 'delete') {
-    const ok = await confirmSheet('Remove this book?', `“${book.title}” will be deleted from your cloud library on all devices.${book.published ? ' It will also be removed from the Book Store.' : ''}`, 'Remove');
+    const ok = await confirmSheet('Remove this book?', `“${book.title}” will be deleted from your cloud library on all devices.`, 'Remove');
     if (!ok) return;
     try {
       await api.deleteBook(book.id);
@@ -394,145 +376,6 @@ function renameBook(book) {
   );
 }
 
-// ------------------------------------------------------------------ book store
-let storeView = null;
-let storeTimer = null;
-
-function showStore() {
-  closeReader();
-  if (!state.user) return showAuth();
-  document.title = 'Book Store · Bindr';
-  libView = null;
-  storeView = tpl('tpl-store');
-  app.replaceChildren(storeView);
-  bindHeader(storeView);
-  const search = storeView.querySelector('.search input');
-  search.value = state.storeQuery;
-  search.oninput = () => {
-    state.storeQuery = search.value;
-    clearTimeout(storeTimer);
-    storeTimer = setTimeout(loadStore, 250);
-  };
-  const sort = storeView.querySelector('.sort');
-  sort.value = state.storeSort;
-  sort.onchange = () => { state.storeSort = sort.value; localStorage.setItem('bindr:store-sort', sort.value); loadStore(); };
-  if (state.storeItems) renderStore();
-  loadStore();
-}
-
-async function loadStore() {
-  const view = storeView;
-  try {
-    const { items } = await api.store(state.storeQuery.trim(), state.storeSort);
-    if (view !== storeView) return;
-    state.storeItems = items;
-    renderStore();
-  } catch (e) {
-    if (view !== storeView) return;
-    state.storeItems = state.storeItems || [];
-    renderStore(e.offline ? 'The Book Store needs an internet connection.' : e.message);
-  }
-}
-
-function storeCoverHtml(item) {
-  const img = item.hasCover ? `<img src="${api.storeCoverUrl(item)}" alt="" loading="lazy" onerror="this.remove()">` : '';
-  return `<div class="cover"><div class="placeholder">${esc(item.title)}</div>${img}</div>`;
-}
-
-function ratingLine(item) {
-  return item.reviewCount
-    ? `${starsHtml(item.rating, 12)}<span>${fmtRating(item.rating)} (${item.reviewCount})</span>`
-    : '<span class="muted">No ratings yet</span>';
-}
-
-function renderStore(error) {
-  if (!storeView) return;
-  const items = state.storeItems || [];
-  const searching = !!state.storeQuery.trim();
-  const grid = storeView.querySelector('.grid');
-  grid.innerHTML = items.map((it) => `
-    <div class="book" data-id="${esc(it.id)}">
-      <button class="book-open" aria-label="${esc(it.title)}">${storeCoverHtml(it)}</button>
-      <div class="book-info"><div class="book-text">
-        <div class="book-title" title="${esc(it.title)}">${esc(it.title)}</div>
-        <div class="book-sub">${esc(it.author || 'Unknown writer')}</div>
-        <div class="book-meta">${ratingLine(it)}</div>
-        ${it.mine ? '<div class="book-sub"><span class="pub-badge">Yours</span></div>' : it.libraryBookId ? '<div class="book-sub"><span class="new">IN LIBRARY</span></div>' : ''}
-      </div></div>
-    </div>`).join('');
-  grid.querySelectorAll('.book').forEach((el) => {
-    el.querySelector('.book-open').onclick = () => storeDetail(el.dataset.id);
-  });
-  const empty = storeView.querySelector('.empty');
-  empty.hidden = items.length > 0;
-  storeView.querySelector('.empty-title').textContent = error ? 'Couldn’t load the Book Store'
-    : searching ? 'No matches' : 'No public books yet';
-  storeView.querySelector('.empty-text').textContent = error
-    || (searching ? 'Try a different title, writer or publisher.' : 'Make one of your books Public from its ••• menu to share it here.');
-  storeView.querySelector('.shelf-title').textContent = searching ? `Results (${items.length})` : 'Public Books';
-}
-
-async function storeDetail(id) {
-  let data;
-  try {
-    data = await api.storeItem(id);
-  } catch (e) {
-    toast(e.message);
-    if (e.status === 404) loadStore();
-    return;
-  }
-  const { item, reviews } = data;
-  const fmtDate = (t) => new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-  const action = await sheet(
-    `<div class="store-detail">
-       ${storeCoverHtml(item)}
-       <div class="store-meta">
-         <h3>${esc(item.title)}</h3>
-         <div class="by">${esc(item.author || 'Unknown writer')}</div>
-         <div class="sub">Published by <b>${esc(item.publisher)}</b></div>
-         <div class="book-meta big">${ratingLine(item)}</div>
-         <div class="sub">${item.pageCount ? `${item.pageCount} pages · ` : ''}${(item.size / 1048576).toFixed(1)} MB · ${item.downloads} reader${item.downloads === 1 ? '' : 's'}</div>
-       </div>
-     </div>
-     <div class="actions">
-       ${item.libraryBookId ? '<button class="btn primary" data-a="read">Read</button>' : '<button class="btn primary" data-a="add">Add to Library</button>'}
-       <button class="btn" data-a="rate">Rate & Review</button>
-       ${item.mine ? '<button class="btn" data-a="manage">Manage</button>' : ''}
-     </div>
-     <h4 class="reviews-title">Reviews</h4>
-     <div class="reviews">${reviews.length ? reviews.map((r) => `
-       <div class="review">
-         <div class="review-head">${starsHtml(r.rating, 13)}<b>${fmtRating(r.rating)}</b>${r.title ? `<span class="review-title">${esc(r.title)}</span>` : ''}</div>
-         ${r.body ? `<p>${esc(r.body).replace(/\n/g, '<br>')}</p>` : ''}
-         <div class="review-by">${esc(r.author)}${r.isPublisher ? ' · Publisher' : ''}${r.mine ? ' · You' : ''} · ${fmtDate(r.updatedAt)}</div>
-       </div>`).join('') : '<p class="muted">No reviews yet. Add the book and be the first to review it.</p>'}</div>`,
-    (el, close) => el.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => close(b.dataset.a))),
-  );
-  if (!action) return;
-  if (action === 'read') return navigate(`/read/${item.libraryBookId}`);
-  let book = state.books.find((b) => b.id === item.libraryBookId);
-  if (action === 'manage' && book) {
-    const updated = await publishSheet(book, state.user);
-    if (updated) replaceBook(updated);
-    return loadStore();
-  }
-  if (!book) {
-    try {
-      book = (await api.addFromStore(item.id)).book;
-      replaceBook(book);
-      if (action === 'add') toast(`“${item.title}” was added to your library.`);
-    } catch (e) {
-      return toast(e.message);
-    }
-  }
-  if (action === 'rate') {
-    const updated = await reviewSheet(book);
-    if (updated) replaceBook(updated);
-  }
-  await loadStore();
-  storeDetail(item.id);
-}
-
 // ------------------------------------------------------------------ upload
 async function startUpload(files) {
   const pdfs = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
@@ -565,52 +408,18 @@ async function startUpload(files) {
            <div class="fname">${esc(it.file.name)} · ${(it.file.size / 1048576).toFixed(1)} MB${it.pageCount ? ` · ${it.pageCount} pages` : ''}</div>
            <label class="field"><span>Title</span><input name="title-${i}" maxlength="200" required value="${esc(it.title)}" ${i === 0 ? 'autofocus' : ''}></label>
            <label class="field"><span>Author</span><input name="author-${i}" maxlength="200" value="${esc(it.author)}" placeholder="Optional"></label>
-           <div class="field"><span>Book Store</span>
-             <div class="seg vis-seg" data-i="${i}">
-               <button type="button" class="seg-btn active" data-vis="private">Private</button>
-               <button type="button" class="seg-btn" data-vis="public">Public</button>
-             </div>
-           </div>
-           <div class="pub-fields" data-i="${i}" hidden>
-             ${publishFieldsHtml(`p${i}-`, { title: it.title, author: it.author, publisher: state.user.name })}
-           </div>
          </div>
        </div>`).join('')}
-       <p class="form-error"></p>
        <div class="actions"><button type="button" class="btn" data-cancel>Cancel</button><button class="btn primary">Add to Library</button></div>
      </form>`,
     (el, close) => {
       const form = el.querySelector('form');
       el.querySelector('[data-cancel]').onclick = () => close(false);
-      const isPublic = valid.map(() => false);
-      el.querySelectorAll('.vis-seg').forEach((seg) => {
-        const i = +seg.dataset.i;
-        seg.querySelectorAll('[data-vis]').forEach((b) => (b.onclick = () => {
-          isPublic[i] = b.dataset.vis === 'public';
-          seg.querySelectorAll('[data-vis]').forEach((x) => x.classList.toggle('active', x === b));
-          el.querySelector(`.pub-fields[data-i="${i}"]`).hidden = !isPublic[i];
-        }));
-        // Keep the store name/writer in step with the library ones until edited separately.
-        for (const f of ['title', 'author']) {
-          const src = form[`${f}-${i}`];
-          const dst = form[`p${i}-${f}`];
-          dst.addEventListener('input', () => { dst.dataset.edited = '1'; });
-          src.addEventListener('input', () => { if (!dst.dataset.edited) dst.value = src.value; });
-        }
-      });
       form.onsubmit = (e) => {
         e.preventDefault();
-        const err = el.querySelector('.form-error');
-        for (let i = 0; i < valid.length; i++) {
-          if (!isPublic[i]) continue;
-          const f = readPublishFields(form, `p${i}-`);
-          if (!f.title || !f.publisher) { err.textContent = 'Public books need a Book Store name and a publisher name.'; return; }
-          if (!f.confirm) { err.textContent = 'Confirm you have the right to share each public book.'; return; }
-        }
         valid.forEach((it, i) => {
           it.title = form[`title-${i}`].value.trim() || it.title;
           it.author = form[`author-${i}`].value.trim();
-          it.publish = isPublic[i] ? readPublishFields(form, `p${i}-`) : null;
         });
         close(true);
       };
@@ -636,14 +445,6 @@ async function startUpload(files) {
       });
       state.books.unshift(book);
       saveBooksLocal();
-      if (it.publish) {
-        try {
-          replaceBook((await api.publish(book.id, it.publish)).book);
-          toast(`“${it.publish.title}” is now in the Book Store.`);
-        } catch (e) {
-          toast(`Uploaded, but publishing failed: ${e.message}`);
-        }
-      }
     } catch (e) {
       toast(`“${it.title}”: ${e.message}`);
     } finally {
@@ -772,7 +573,6 @@ function showReader(book) {
   const view = tpl('tpl-reader');
   app.replaceChildren(view);
   libView = null;
-  storeView = null;
 
   const pending = JSON.parse(localStorage.getItem('bindr:pending') || '{}')[book.id];
   const start = pending?.currentPage || book.currentPage || 1;

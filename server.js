@@ -20,8 +20,7 @@ const DATA_DIR = path.resolve(
 const BOOKS_DIR = path.join(DATA_DIR, 'books');
 const COVERS_DIR = path.join(DATA_DIR, 'covers');
 const TMP_DIR = path.join(DATA_DIR, 'tmp');
-const STORE_DIR = path.join(DATA_DIR, 'store');
-for (const dir of [DATA_DIR, BOOKS_DIR, COVERS_DIR, TMP_DIR, STORE_DIR]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [DATA_DIR, BOOKS_DIR, COVERS_DIR, TMP_DIR]) fs.mkdirSync(dir, { recursive: true });
 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 300;
@@ -63,33 +62,6 @@ db.exec(`
     last_opened_at INTEGER
   );
   CREATE INDEX IF NOT EXISTS books_user ON books(user_id);
-
-  -- Book Store: books their owners made public.
-  CREATE TABLE IF NOT EXISTS store_items (
-    id         TEXT PRIMARY KEY,
-    owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    book_id    TEXT NOT NULL UNIQUE,
-    title      TEXT NOT NULL,
-    author     TEXT NOT NULL DEFAULT '',
-    publisher  TEXT NOT NULL,
-    page_count INTEGER NOT NULL DEFAULT 0,
-    size       INTEGER NOT NULL,
-    has_cover  INTEGER NOT NULL DEFAULT 0,
-    downloads  INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS store_reviews (
-    store_id    TEXT NOT NULL REFERENCES store_items(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    rating      REAL NOT NULL,
-    title       TEXT NOT NULL DEFAULT '',
-    body        TEXT NOT NULL DEFAULT '',
-    author_name TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    PRIMARY KEY (store_id, user_id)
-  );
 `);
 
 // Columns added after the first release.
@@ -100,8 +72,15 @@ db.exec(`
   add('review_title', "TEXT NOT NULL DEFAULT ''");
   add('review_body', "TEXT NOT NULL DEFAULT ''");
   add('reviewed_at', 'INTEGER');
-  add('store_id', 'TEXT'); // the Book Store listing this copy is linked to (published by, or added from)
 }
+
+// Clean up after the Book Store, which has been removed. Books people added from it
+// stay in their libraries as ordinary books.
+db.exec('DROP TABLE IF EXISTS store_reviews; DROP TABLE IF EXISTS store_items;');
+if (db.prepare('PRAGMA table_info(books)').all().some((c) => c.name === 'store_id')) {
+  db.exec('ALTER TABLE books DROP COLUMN store_id');
+}
+fs.rm(path.join(DATA_DIR, 'store'), { recursive: true, force: true }, () => {});
 
 const q = {
   userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
@@ -116,28 +95,14 @@ const q = {
   deleteSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
   deleteUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?'),
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
-  listBooks: db.prepare(`SELECT b.*, s.id AS pub_id, s.title AS pub_title, s.author AS pub_author, s.publisher AS pub_publisher
-    FROM books b LEFT JOIN store_items s ON s.book_id = b.id WHERE b.user_id = ?
-    ORDER BY COALESCE(b.last_opened_at, b.created_at) DESC`),
-  getBook: db.prepare(`SELECT b.*, s.id AS pub_id, s.title AS pub_title, s.author AS pub_author, s.publisher AS pub_publisher
-    FROM books b LEFT JOIN store_items s ON s.book_id = b.id WHERE b.id = ? AND b.user_id = ?`),
+  listBooks: db.prepare(`SELECT * FROM books WHERE user_id = ?
+    ORDER BY COALESCE(last_opened_at, created_at) DESC`),
+  getBook: db.prepare('SELECT * FROM books WHERE id = ? AND user_id = ?'),
   insertBook: db.prepare(`INSERT INTO books
     (id, user_id, title, author, original_name, size, page_count, has_cover, created_at, updated_at)
     VALUES (@id, @user_id, @title, @author, @original_name, @size, @page_count, @has_cover, @now, @now)`),
   deleteBook: db.prepare('DELETE FROM books WHERE id = ? AND user_id = ?'),
   userBookIds: db.prepare('SELECT id FROM books WHERE user_id = ?'),
-  userStoreIds: db.prepare('SELECT id FROM store_items WHERE owner_id = ?'),
-  storeByBook: db.prepare('SELECT * FROM store_items WHERE book_id = ?'),
-  storeItem: db.prepare('SELECT * FROM store_items WHERE id = ?'),
-  deleteStoreItem: db.prepare('DELETE FROM store_items WHERE id = ?'),
-  unlinkStoreCopies: db.prepare('UPDATE books SET store_id = NULL WHERE store_id = ?'),
-  upsertReview: db.prepare(`INSERT INTO store_reviews (store_id, user_id, rating, title, body, author_name, created_at, updated_at)
-    VALUES (@store_id, @user_id, @rating, @title, @body, @author_name, @now, @now)
-    ON CONFLICT (store_id, user_id) DO UPDATE SET rating = excluded.rating, title = excluded.title,
-      body = excluded.body, author_name = excluded.author_name, updated_at = excluded.updated_at`),
-  deleteReview: db.prepare('DELETE FROM store_reviews WHERE store_id = ? AND user_id = ?'),
-  storeReviews: db.prepare(`SELECT user_id, rating, title, body, author_name, created_at, updated_at
-    FROM store_reviews WHERE store_id = ? ORDER BY updated_at DESC LIMIT 200`),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
 };
 
@@ -160,11 +125,6 @@ function publicBook(b) {
     rating: b.rating ?? null,
     reviewTitle: b.review_title || '',
     reviewBody: b.review_body || '',
-    storeId: b.store_id || null,
-    visibility: b.pub_id ? 'public' : 'private',
-    published: b.pub_id
-      ? { storeId: b.pub_id, title: b.pub_title, author: b.pub_author, publisher: b.pub_publisher }
-      : null,
   };
 }
 
@@ -303,7 +263,6 @@ app.delete('/api/me', auth, async (req, res) => {
     return res.status(400).json({ error: 'Password is incorrect.' });
   }
   for (const { id } of q.userBookIds.all(req.user.id)) removeBookFiles(id);
-  for (const { id } of q.userStoreIds.all(req.user.id)) { q.unlinkStoreCopies.run(id); removeStoreFiles(id); }
   q.deleteUser.run(req.user.id);
   res.clearCookie(COOKIE, { path: '/' });
   res.json({ ok: true });
@@ -312,27 +271,6 @@ app.delete('/api/me', auth, async (req, res) => {
 // --- books -----------------------------------------------------------------
 const bookPath = (id) => path.join(BOOKS_DIR, `${id}.pdf`);
 const coverPath = (id) => path.join(COVERS_DIR, `${id}.jpg`);
-
-const storePath = (id) => path.join(STORE_DIR, `${id}.pdf`);
-const storeCoverPath = (id) => path.join(STORE_DIR, `${id}.jpg`);
-
-function removeStoreFiles(id) {
-  fs.rm(storePath(id), { force: true }, () => {});
-  fs.rm(storeCoverPath(id), { force: true }, () => {});
-}
-
-/** Hard-link (same volume, no extra space) or copy a file. */
-function linkOrCopy(from, to) {
-  try { fs.linkSync(from, to); } catch { fs.copyFileSync(from, to); }
-}
-
-function unpublish(item) {
-  db.transaction(() => {
-    q.unlinkStoreCopies.run(item.id);
-    q.deleteStoreItem.run(item.id);
-  })();
-  removeStoreFiles(item.id);
-}
 
 function removeBookFiles(id) {
   fs.rm(bookPath(id), { force: true }, () => {});
@@ -435,8 +373,6 @@ app.patch('/api/books/:id', auth, (req, res) => {
 });
 
 app.delete('/api/books/:id', auth, (req, res) => {
-  const item = q.storeByBook.get(req.params.id);
-  if (item && item.owner_id === req.user.id) unpublish(item);
   const result = q.deleteBook.run(req.params.id, req.user.id);
   if (!result.changes) return res.status(404).json({ error: 'Book not found.' });
   removeBookFiles(req.params.id);
@@ -460,17 +396,6 @@ app.get('/api/books/:id/cover', auth, (req, res) => {
 });
 
 // --- ratings & reviews -----------------------------------------------------
-function syncStoreReview(book, user) {
-  if (!book.store_id || !q.storeItem.get(book.store_id)) return;
-  if (book.rating == null) q.deleteReview.run(book.store_id, user.id);
-  else {
-    q.upsertReview.run({
-      store_id: book.store_id, user_id: user.id, rating: book.rating, title: book.review_title,
-      body: book.review_body, author_name: user.name, now: Date.now(),
-    });
-  }
-}
-
 app.put('/api/books/:id/review', auth, (req, res) => {
   const book = q.getBook.get(req.params.id, req.user.id);
   if (!book) return res.status(404).json({ error: 'Book not found.' });
@@ -482,9 +407,7 @@ app.put('/api/books/:id/review', auth, (req, res) => {
   db.prepare(`UPDATE books SET rating = ?, review_title = ?, review_body = ?, reviewed_at = ?, updated_at = ?
     WHERE id = ? AND user_id = ?`).run(rating, cleanText(req.body.title, 120), cleanMultiline(req.body.body, 5000),
     Date.now(), Date.now(), book.id, req.user.id);
-  const updated = q.getBook.get(book.id, req.user.id);
-  syncStoreReview(updated, req.user);
-  res.json({ book: publicBook(updated) });
+  res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
 });
 
 app.delete('/api/books/:id/review', auth, (req, res) => {
@@ -492,146 +415,7 @@ app.delete('/api/books/:id/review', auth, (req, res) => {
   if (!book) return res.status(404).json({ error: 'Book not found.' });
   db.prepare(`UPDATE books SET rating = NULL, review_title = '', review_body = '', reviewed_at = NULL
     WHERE id = ? AND user_id = ?`).run(book.id, req.user.id);
-  const updated = q.getBook.get(book.id, req.user.id);
-  syncStoreReview(updated, req.user);
-  res.json({ book: publicBook(updated) });
-});
-
-// --- publishing to the Book Store ------------------------------------------
-app.put('/api/books/:id/publish', auth, (req, res) => {
-  const book = q.getBook.get(req.params.id, req.user.id);
-  if (!book) return res.status(404).json({ error: 'Book not found.' });
-  const title = cleanText(req.body?.title, 200);
-  const author = cleanText(req.body?.author, 200);
-  const publisher = cleanText(req.body?.publisher, 80);
-  if (!title) return res.status(400).json({ error: 'Give the book a name for the Book Store.' });
-  if (!publisher) return res.status(400).json({ error: 'Enter the account name to publish as.' });
-  if (req.body?.confirm !== true) {
-    return res.status(400).json({ error: 'Confirm that you have the right to share this book publicly.' });
-  }
-  const now = Date.now();
-  let item = q.storeByBook.get(book.id);
-  if (item && item.owner_id !== req.user.id) return res.status(403).json({ error: 'Not allowed.' });
-  // A copy added from the store can't be re-published as someone else's.
-  if (!item && book.store_id && q.storeItem.get(book.store_id)) {
-    return res.status(400).json({ error: 'This book came from the Book Store, so it is already public.' });
-  }
-  if (item) {
-    db.prepare('UPDATE store_items SET title = ?, author = ?, publisher = ?, updated_at = ? WHERE id = ?')
-      .run(title, author, publisher, now, item.id);
-  } else {
-    const id = newId();
-    try {
-      linkOrCopy(bookPath(book.id), storePath(id));
-      if (book.has_cover) linkOrCopy(coverPath(book.id), storeCoverPath(id));
-    } catch (e) {
-      console.error(e);
-      removeStoreFiles(id);
-      return res.status(500).json({ error: 'Could not publish the book.' });
-    }
-    db.prepare(`INSERT INTO store_items (id, owner_id, book_id, title, author, publisher, page_count, size, has_cover, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, req.user.id, book.id, title, author, publisher, book.page_count, book.size, book.has_cover, now, now);
-    db.prepare('UPDATE books SET store_id = ? WHERE id = ?').run(id, book.id);
-    item = q.storeItem.get(id);
-  }
-  // The owner's rating (if any) is published with the book.
-  syncStoreReview(q.getBook.get(book.id, req.user.id), req.user);
   res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
-});
-
-app.delete('/api/books/:id/publish', auth, (req, res) => {
-  const book = q.getBook.get(req.params.id, req.user.id);
-  if (!book) return res.status(404).json({ error: 'Book not found.' });
-  const item = q.storeByBook.get(book.id);
-  if (item && item.owner_id === req.user.id) unpublish(item);
-  res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
-});
-
-// --- Book Store --------------------------------------------------------------
-function publicStoreItem(s, userId) {
-  return {
-    id: s.id,
-    title: s.title,
-    author: s.author,
-    publisher: s.publisher,
-    pageCount: s.page_count,
-    size: s.size,
-    hasCover: !!s.has_cover,
-    downloads: s.downloads,
-    createdAt: s.created_at,
-    updatedAt: s.updated_at,
-    rating: s.avg_rating == null ? null : Math.round(s.avg_rating * 10) / 10,
-    reviewCount: s.review_count || 0,
-    mine: s.owner_id === userId,
-    libraryBookId: s.library_book_id || null,
-  };
-}
-
-const STORE_SELECT = `SELECT s.*,
-    (SELECT AVG(rating) FROM store_reviews r WHERE r.store_id = s.id) AS avg_rating,
-    (SELECT COUNT(*) FROM store_reviews r WHERE r.store_id = s.id) AS review_count,
-    (SELECT b.id FROM books b WHERE b.store_id = s.id AND b.user_id = @user ORDER BY b.created_at LIMIT 1) AS library_book_id
-  FROM store_items s`;
-const STORE_SORTS = {
-  new: 's.created_at DESC',
-  rating: 'avg_rating IS NULL, avg_rating DESC, review_count DESC',
-  popular: 's.downloads DESC, s.created_at DESC',
-  title: 's.title COLLATE NOCASE ASC',
-};
-
-app.get('/api/store', auth, (req, res) => {
-  const search = cleanText(req.query.q, 100);
-  const sort = STORE_SORTS[req.query.sort] || STORE_SORTS.new;
-  const like = `%${search.replace(/[%_\\]/g, (c) => `\\${c}`)}%`;
-  const rows = db.prepare(`${STORE_SELECT}
-    WHERE (@q = '' OR s.title LIKE @like ESCAPE '\\' OR s.author LIKE @like ESCAPE '\\' OR s.publisher LIKE @like ESCAPE '\\')
-    ORDER BY ${sort} LIMIT 300`).all({ user: req.user.id, q: search, like });
-  res.json({ items: rows.map((r) => publicStoreItem(r, req.user.id)) });
-});
-
-app.get('/api/store/:id', auth, (req, res) => {
-  const row = db.prepare(`${STORE_SELECT} WHERE s.id = @id`).get({ user: req.user.id, id: req.params.id });
-  if (!row) return res.status(404).json({ error: 'This book is no longer in the Book Store.' });
-  const reviews = q.storeReviews.all(row.id).map((r) => ({
-    rating: r.rating, title: r.title, body: r.body, author: r.author_name,
-    mine: r.user_id === req.user.id, isPublisher: r.user_id === row.owner_id,
-    createdAt: r.created_at, updatedAt: r.updated_at,
-  }));
-  res.json({ item: publicStoreItem(row, req.user.id), reviews });
-});
-
-app.get('/api/store/:id/cover', auth, (req, res) => {
-  const item = q.storeItem.get(req.params.id);
-  if (!item || !item.has_cover) return res.status(404).end();
-  res.setHeader('Cache-Control', 'private, max-age=86400');
-  res.sendFile(storeCoverPath(item.id), (err) => { if (err && !res.headersSent) res.status(404).end(); });
-});
-
-// Add a store book to your own library (your own copy, with your own progress and review).
-app.post('/api/store/:id/library', auth, (req, res) => {
-  const item = q.storeItem.get(req.params.id);
-  if (!item) return res.status(404).json({ error: 'This book is no longer in the Book Store.' });
-  const existing = db.prepare('SELECT id FROM books WHERE store_id = ? AND user_id = ?').get(item.id, req.user.id);
-  if (existing) return res.json({ book: publicBook(q.getBook.get(existing.id, req.user.id)) });
-  const id = newId();
-  try {
-    linkOrCopy(storePath(item.id), bookPath(id));
-    if (item.has_cover) linkOrCopy(storeCoverPath(item.id), coverPath(id));
-  } catch (e) {
-    console.error(e);
-    removeBookFiles(id);
-    return res.status(500).json({ error: 'Could not add the book.' });
-  }
-  db.transaction(() => {
-    q.insertBook.run({
-      id, user_id: req.user.id, title: item.title, author: item.author, original_name: `${item.title}.pdf`,
-      size: item.size, page_count: item.page_count, has_cover: item.has_cover, now: Date.now(),
-    });
-    db.prepare('UPDATE books SET store_id = ? WHERE id = ?').run(item.id, id);
-    db.prepare('UPDATE store_items SET downloads = downloads + 1 WHERE id = ?').run(item.id);
-  })();
-  res.status(201).json({ book: publicBook(q.getBook.get(id, req.user.id)) });
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));

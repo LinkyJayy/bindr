@@ -68,10 +68,6 @@
             <button class="avatar" data-action="account" aria-label="Account" title="Account"></button>
           </div>
         </div>
-        <nav class="tabs lib-tabs" aria-label="Sections">
-          <a href="/" class="tab active" data-tab="library" aria-current="page">Library</a>
-          <a href="/store" class="tab" data-tab="store">Book Store</a>
-        </nav>
         <div class="lib-tools">
           <div class="search">
             <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -101,45 +97,6 @@
       </section>
       <input type="file" class="file-input" accept="application/pdf,.pdf" multiple hidden>
       <div class="drop-overlay" hidden><div>Drop PDFs to add them to your library</div></div>
-    </div>
-  </template>
-
-  <!-- Book Store -->
-  <template id="tpl-store">
-    <div class="library store">
-      <header class="lib-header">
-        <div class="lib-header-inner">
-          <h1>Book Store</h1>
-          <div class="lib-actions">
-            <button class="avatar" data-action="account" aria-label="Account" title="Account"></button>
-          </div>
-        </div>
-        <nav class="tabs lib-tabs" aria-label="Sections">
-          <a href="/" class="tab" data-tab="library">Library</a>
-          <a href="/store" class="tab active" data-tab="store" aria-current="page">Book Store</a>
-        </nav>
-        <div class="lib-tools">
-          <div class="search">
-            <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            <input type="search" placeholder="Search books, writers, publishers" aria-label="Search the Book Store">
-          </div>
-          <select class="sort" aria-label="Sort">
-            <option value="new">Newest</option>
-            <option value="rating">Top Rated</option>
-            <option value="popular">Popular</option>
-            <option value="title">Title</option>
-          </select>
-        </div>
-      </header>
-      <section class="shelf">
-        <h2 class="shelf-title">Public Books</h2>
-        <div class="grid"></div>
-        <div class="empty" hidden>
-          <img src="/icons/glyph-256.png" alt="" width="72" height="72">
-          <h2 class="empty-title">No public books yet</h2>
-          <p class="empty-text">Make one of your books Public from its ••• menu to share it here.</p>
-        </div>
-      </section>
     </div>
   </template>
 

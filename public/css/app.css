@@ -282,15 +282,6 @@ button { cursor: pointer; }
 }
 @media (max-width: 420px) { .tts-voice { max-width: 96px; } }
 
-/* ---------- tabs ---------- */
-.lib-tabs { max-width: 1132px; margin: 6px auto 0; padding: 0 var(--gutter); display: flex; gap: 6px; }
-.tab {
-  text-decoration: none; color: var(--muted); font-weight: 600; font-size: 15px;
-  padding: 7px 14px; border-radius: 999px; background: transparent;
-}
-.tab:hover { background: var(--surface-2); }
-.tab.active { background: var(--text); color: var(--bg); }
-
 /* ---------- stars & ratings ---------- */
 .stars { display: inline-flex; gap: 1px; vertical-align: middle; line-height: 0; }
 .star { position: relative; display: inline-block; flex: none; }
@@ -300,12 +291,6 @@ button { cursor: pointer; }
 .star-fill path { fill: #f5a623; stroke: #f5a623; stroke-width: 1.6; stroke-linejoin: round; }
 .book-meta { display: flex; align-items: center; gap: 5px; margin-top: 3px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .book-meta.big { font-size: 14px; margin: 8px 0; }
-.pub-badge {
-  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
-  color: var(--accent-strong); background: color-mix(in srgb, var(--accent) 14%, transparent);
-  padding: 2px 6px; border-radius: 999px;
-}
-.muted { color: var(--muted); }
 .book-open { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
 
 .rating-row { display: flex; align-items: center; gap: 14px; margin: 4px 0 16px; }
@@ -316,28 +301,9 @@ button { cursor: pointer; }
   outline: none; font: inherit; font-size: 16px; resize: vertical; min-height: 110px; color: var(--text);
 }
 .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
-.hint { font-size: 13px; color: var(--muted); margin: 0 0 8px 4px; }
 .danger-text { color: var(--danger) !important; }
 .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; margin: 4px 4px 12px; cursor: pointer; }
 .check input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); flex: none; }
-.vis-seg { margin-bottom: 14px; }
-.upload-item .vis-seg { margin-bottom: 4px; }
-.pub-fields { border-left: 3px solid var(--accent); padding-left: 10px; margin: 6px 0 4px; }
-
-/* ---------- store detail ---------- */
-.store-detail { display: flex; gap: 16px; margin-bottom: 14px; }
-.store-detail .cover { width: 110px; flex: none; align-self: flex-start; }
-.store-meta { min-width: 0; }
-.store-meta h3 { margin: 0 0 2px; font-size: 20px; }
-.store-meta .by { font-size: 15px; }
-.store-meta .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
-.sheet .actions { flex-wrap: wrap; }
-.reviews-title { margin: 22px 0 8px; font-size: 17px; }
-.review { border-top: 1px solid var(--line); padding: 12px 0; }
-.review-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.review-title { font-weight: 700; margin-left: 4px; }
-.review p { margin: 6px 0 4px; font-size: 15px; white-space: normal; overflow-wrap: anywhere; }
-.review-by { font-size: 12px; color: var(--muted); }
 
 /* ---------- color filter panel ---------- */
 .filter-panel {

@@ -36,12 +36,6 @@ export const api = {
   fileUrl: (id) => `/api/books/${encodeURIComponent(id)}/file`,
   saveReview: (id, review) => request('PUT', `/api/books/${encodeURIComponent(id)}/review`, review),
   deleteReview: (id) => request('DELETE', `/api/books/${encodeURIComponent(id)}/review`),
-  publish: (id, fields) => request('PUT', `/api/books/${encodeURIComponent(id)}/publish`, fields),
-  unpublish: (id) => request('DELETE', `/api/books/${encodeURIComponent(id)}/publish`),
-  store: (q, sort) => request('GET', `/api/store?q=${encodeURIComponent(q || '')}&sort=${encodeURIComponent(sort || 'new')}`),
-  storeItem: (id) => request('GET', `/api/store/${encodeURIComponent(id)}`),
-  addFromStore: (id) => request('POST', `/api/store/${encodeURIComponent(id)}/library`),
-  storeCoverUrl: (item) => `/api/store/${encodeURIComponent(item.id)}/cover?v=${item.createdAt}`,
   coverUrl: (book) => `/api/books/${encodeURIComponent(book.id)}/cover?v=${book.createdAt}`,
 
   /** Upload with progress reporting (fetch can't report upload progress). */
