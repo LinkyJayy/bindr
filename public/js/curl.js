@@ -14,16 +14,23 @@ void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
 
 const FRAG = `
 precision highp float;
-uniform sampler2D uFront;   // sheet being turned
-uniform sampler2D uUnder;   // page revealed underneath
+uniform sampler2D uFront;   // sheet being turned (front side)
+uniform sampler2D uUnder;   // page revealed underneath the sheet
+uniform sampler2D uBack;    // reverse side of the sheet (two-page spread only)
+uniform sampler2D uLeft;    // page on the opposite side of the spine (spread only)
 uniform vec2  uRes;         // canvas size (device px)
-uniform vec4  uPage;        // page rect: x, y, w, h (device px, top-left origin)
+uniform vec4  uPage;        // rect of the page the sheet lies on: x, y, w, h (device px, top-left origin)
 uniform vec2  uP;           // point on curl axis (page space)
 uniform vec2  uD;           // unit vector pointing toward the lifted edge
 uniform float uR;           // cylinder radius
-uniform float uActive;      // 0 = flat page, 1 = curling
+uniform float uActive;      // 0 = flat, 1 = curling
+uniform float uSpread;      // 1 = two-page spread with the spine at x = 0
+uniform float uFlip;        // 1 = mirror everything about the spine (turning backwards in a spread)
+uniform float uHasUnder;
+uniform float uHasLeft;
+uniform vec2  uShadowX;     // horizontal extent of the visible pages, for the drop shadow
 uniform vec3  uBg;
-uniform vec3  uPaperBack;   // tint of the reverse side of the paper
+uniform vec3  uPaperBack;   // tint of the reverse side of the paper (single page)
 uniform float uDpr;
 
 const float PI = 3.14159265;
@@ -33,18 +40,38 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.545
 bool inPage(vec2 p) {
   return p.x >= 0.0 && p.y >= 0.0 && p.x <= uPage.z && p.y <= uPage.w;
 }
-vec3 front(vec2 p) { return texture2D(uFront, p / uPage.zw).rgb; }
-vec3 under(vec2 p) { return texture2D(uUnder, p / uPage.zw).rgb; }
-// Reverse side: the print shows through faintly, mirrored (sampling at the
-// original position does the mirroring for us).
-vec3 backSide(vec2 p) { return mix(front(p), uPaperBack, 0.86); }
+bool inLeft(vec2 p) {
+  return uSpread > 0.5 && p.x < 0.0 && p.x >= -uPage.z && p.y >= 0.0 && p.y <= uPage.w;
+}
+vec2 uvOf(vec2 p) {
+  vec2 uv = p / uPage.zw;
+  if (uFlip > 0.5) uv.x = 1.0 - uv.x;
+  return uv;
+}
+vec3 front(vec2 p) { return texture2D(uFront, uvOf(p)).rgb; }
+vec3 under(vec2 p) { return texture2D(uUnder, uvOf(p)).rgb; }
+vec3 leftPage(vec2 p) { return texture2D(uLeft, uvOf(p + vec2(uPage.z, 0.0))).rgb; }
+// Reverse side of the sheet. In a spread it's the next page; on a single page
+// the print shows through faintly, mirrored (sampling at the original position
+// does the mirroring for us).
+vec3 backSide(vec2 p) {
+  if (uSpread > 0.5) return texture2D(uBack, uvOf(vec2(uPage.z - p.x, p.y))).rgb;
+  return mix(front(p), uPaperBack, 0.86);
+}
+// Shading where the pages dip into the binding.
+float gutter(float sx) {
+  if (uSpread < 0.5) return 1.0;
+  float a = abs(sx) / uPage.z;
+  return 1.0 - 0.16 * exp(-a / 0.03) - 0.05 * exp(-a / 0.2);
+}
 
-// Distance from p to the page rectangle (0 inside).
-float rectDist(vec2 p) {
-  vec2 half_ = uPage.zw * 0.5;
-  vec2 q = abs(p - half_) - half_;
+float boxDist(vec2 p, vec2 mn, vec2 mx) {
+  vec2 c = (mn + mx) * 0.5;
+  vec2 q = abs(p - c) - (mx - mn) * 0.5;
   return length(max(q, 0.0));
 }
+// Distance from p to the sheet's rectangle (0 inside).
+float rectDist(vec2 p) { return boxDist(p, vec2(0.0), uPage.zw); }
 
 void mainImage();
 void main() {
@@ -54,14 +81,18 @@ void main() {
 
 void mainImage() {
   vec2 frag = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
-  vec2 x = frag - uPage.xy;
+  vec2 xw = frag - uPage.xy;
+  vec2 x = uFlip > 0.5 ? vec2(-xw.x, xw.y) : xw;
 
-  // Soft drop shadow around the page on the background.
-  float outside = rectDist(x);
+  // Soft drop shadow around the book on the background.
+  float outside = boxDist(xw, vec2(uShadowX.x, 0.0), vec2(uShadowX.y, uPage.w));
   vec3 bg = uBg * (1.0 - 0.22 * exp(-outside / (7.0 * uDpr)));
+  vec3 underC = uHasUnder > 0.5 ? under(x) * gutter(x.x) : bg;
 
   if (uActive < 0.5) {
-    gl_FragColor = vec4(inPage(x) ? under(x) : bg, 1.0);
+    if (inPage(x)) gl_FragColor = vec4(underC, 1.0);
+    else if (inLeft(x) && uHasLeft > 0.5) gl_FragColor = vec4(leftPage(x) * gutter(x.x), 1.0);
+    else gl_FragColor = vec4(bg, 1.0);
     return;
   }
 
@@ -73,7 +104,7 @@ void mainImage() {
     vec2 xo = x + (PI * R - 2.0 * d) * uD;
     if (inPage(xo)) {
       // Matches the top of the cylinder (shade 1.0) so there's no seam.
-      gl_FragColor = vec4(backSide(xo), 1.0);
+      gl_FragColor = vec4(backSide(xo) * gutter(xo.x), 1.0);
       return;
     }
   }
@@ -101,26 +132,35 @@ void mainImage() {
     }
   }
 
+  // Shadow cast by the folded-over flap onto whatever lies below it.
+  float flapShadow = 1.0;
+  if (d < 0.0) {
+    vec2 flap = x + (PI * R - 2.0 * d) * uD;
+    flapShadow = 1.0 - 0.28 * exp(-rectDist(flap) / (5.0 * uDpr));
+  }
+
   // 3) Untouched flat part of the sheet.
   if (d < 0.0 && inPage(x)) {
-    vec3 c = front(x);
-    // Shadow cast by the folded-over flap onto the page below it.
-    vec2 flap = x + (PI * R - 2.0 * d) * uD;
-    float dist = rectDist(flap);
-    c *= 1.0 - 0.28 * exp(-dist / (5.0 * uDpr));
+    vec3 c = front(x) * gutter(x.x) * flapShadow;
     // Ambient occlusion right under the cylinder.
     c *= 1.0 - 0.18 * smoothstep(-R, 0.0, d);
     gl_FragColor = vec4(c, 1.0);
     return;
   }
 
+  float e = max(d - R, 0.0);
+  float curlShadow = 1.0 - 0.4 * exp(-e / (R * 0.9 + 6.0 * uDpr));
+
   // 4) Page underneath, darkened by the shadow of the curl.
   if (inPage(x)) {
-    vec3 c = under(x);
-    float e = max(d - R, 0.0);
-    float sh = exp(-e / (R * 0.9 + 6.0 * uDpr));
-    c *= 1.0 - 0.4 * sh;
-    gl_FragColor = vec4(c, 1.0);
+    gl_FragColor = vec4(underC * curlShadow, 1.0);
+    return;
+  }
+
+  // 5) Opposite page of a spread, which the turned sheet lands on.
+  if (inLeft(x)) {
+    vec3 c = uHasLeft > 0.5 ? leftPage(x) * gutter(x.x) : bg;
+    gl_FragColor = vec4(c * (d < 0.0 ? flapShadow : curlShadow), 1.0);
     return;
   }
 
@@ -158,14 +198,15 @@ export class CurlRenderer {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
     this.u = {};
-    for (const n of ['uFront', 'uUnder', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive', 'uBg', 'uPaperBack', 'uDpr']) {
+    for (const n of ['uFront', 'uUnder', 'uBack', 'uLeft', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive',
+      'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
-    gl.uniform1i(this.u.uFront, 0);
-    gl.uniform1i(this.u.uUnder, 1);
+    // Texture units, in slot order.
+    ['uFront', 'uUnder', 'uBack', 'uLeft'].forEach((n, i) => gl.uniform1i(this.u[n], i));
 
-    this.textures = [this._tex(), this._tex()];
-    this.sources = [null, null];
+    this.textures = [this._tex(), this._tex(), this._tex(), this._tex()];
+    this.sources = [null, null, null, null];
     this.maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     this.bg = [0.95, 0.95, 0.95];
     this.paperBack = [0.98, 0.975, 0.965];
@@ -183,12 +224,12 @@ export class CurlRenderer {
     return t;
   }
 
-  /** slot 0 = sheet being turned, slot 1 = page underneath. */
+  /** Slots: 0 = sheet being turned, 1 = page underneath, 2 = back of the sheet, 3 = opposite page. */
   setTexture(slot, source) {
     if (this.sources[slot] === source) return;
     this.sources[slot] = source;
     const gl = this.gl;
-    gl.activeTexture(slot ? gl.TEXTURE1 : gl.TEXTURE0);
+    gl.activeTexture(gl.TEXTURE0 + slot);
     gl.bindTexture(gl.TEXTURE_2D, this.textures[slot]);
     if (source) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -205,9 +246,12 @@ export class CurlRenderer {
 
   /**
    * Draw a frame.
-   * page: {x, y, w, h} in device px. curl: null (flat, shows slot 1) or {P:[x,y], D:[x,y], R}.
+   * page: {x, y, w, h} in device px — the page the sheet lies on (in a spread, the right-hand
+   *   page, so the spine is at its left edge).
+   * curl: null (flat) or {P:[x,y], D:[x,y], R}.
+   * opts: {spread, flip, hasUnder, hasLeft, shadowX:[minX, maxX]}.
    */
-  draw(page, curl, dpr) {
+  draw(page, curl, dpr, opts = {}) {
     const gl = this.gl;
     const { width, height } = this.canvas;
     gl.viewport(0, 0, width, height);
@@ -216,10 +260,16 @@ export class CurlRenderer {
     gl.uniform3fv(this.u.uBg, this.bg);
     gl.uniform3fv(this.u.uPaperBack, this.paperBack);
     gl.uniform1f(this.u.uDpr, dpr);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.textures[1]);
+    gl.uniform1f(this.u.uSpread, opts.spread ? 1 : 0);
+    gl.uniform1f(this.u.uFlip, opts.flip ? 1 : 0);
+    gl.uniform1f(this.u.uHasUnder, opts.hasUnder === false ? 0 : 1);
+    gl.uniform1f(this.u.uHasLeft, opts.hasLeft ? 1 : 0);
+    const [sx0, sx1] = opts.shadowX || [0, page.w];
+    gl.uniform2f(this.u.uShadowX, sx0, sx1);
+    this.textures.forEach((t, i) => {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, t);
+    });
     if (curl) {
       gl.uniform1f(this.u.uActive, 1);
       gl.uniform2f(this.u.uP, curl.P[0], curl.P[1]);

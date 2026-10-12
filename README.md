@@ -8,6 +8,7 @@ Installable as a PWA and ready to deploy on Railway.
 - **Upload.** Use the **+** button, or drag and drop PDFs onto the library. Bindr reads each PDF's title, author and first page (for the cover) before uploading.
 - **Custom names.** You choose each book's title and author before it uploads. Change them any time with **••• → Rename / Edit Details**.
 - **Page curl.** A WebGL shader rolls the page over a cylinder, with lighting, the mirrored print showing through the back, and shadows. Drag from any edge or corner, flick, tap the left or right third of the page, or use the arrow keys, Space or the scroll wheel.
+- **Two-page spreads.** Landscape tablets and wide screens show facing pages like an open book, with the cover on its own. The page curls across the spine onto the facing page. The book button in the reader's top bar switches between one and two pages.
 - **PWA.** Installable and works offline: the app shell is cached, and every book you have opened stays readable offline. Progress made offline syncs when you reconnect.
 
 ## Run locally

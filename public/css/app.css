@@ -246,6 +246,7 @@ button { cursor: pointer; }
 .reader-bar.bottom { bottom: 0; padding-bottom: calc(10px + var(--safe-bottom)); padding-top: 10px; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); }
 .reader.chrome-hidden .reader-bar.top { transform: translateY(-100%); opacity: 0; pointer-events: none; }
 .reader.chrome-hidden .reader-bar.bottom { transform: translateY(100%); opacity: 0; pointer-events: none; }
+.icon-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .reader-title { flex: 1; text-align: center; font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .page-label { font-size: 12px; color: var(--muted); }
 .scrubber { width: 100%; max-width: 640px; accent-color: var(--accent); }

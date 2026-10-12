@@ -29,7 +29,10 @@ export class Reader {
       title: root.querySelector('.reader-title'),
       scrubber: root.querySelector('.scrubber'),
       label: root.querySelector('.page-label'),
+      layoutBtn: root.querySelector('[data-action="layout"]'),
     };
+    this.spread = false;
+    try { this.layoutPref = localStorage.getItem('bindr:layout'); } catch { this.layoutPref = null; }
     this.el.title.textContent = book.title;
   }
 
@@ -62,8 +65,8 @@ export class Reader {
 
     this.page = Math.min(Math.max(1, startPage || 1), this.numPages);
     this.el.scrubber.max = String(this.numPages);
-    this._updateChrome();
     this._layout();
+    this._updateChrome();
     await this._render(this.page);
     if (this.destroyed) return;
     this.el.loading.hidden = true;
@@ -94,15 +97,27 @@ export class Reader {
     const small = W < 600;
     const mx = small ? 8 : 40;
     const my = small ? 12 : 28;
-    let pw = W - mx * 2;
-    let ph = pw / (this.aspect || 0.7);
-    if (ph > H - my * 2) { ph = H - my * 2; pw = ph * (this.aspect || 0.7); }
+    const aspect = this.aspect || 0.7;
+    // Two-page spread on landscape tablets and wide screens (unless the reader chose otherwise).
+    const canSpread = !!this.renderer && W >= 700 && aspect < 1.2;
+    const autoSpread = W >= 900 ? W > H * 1.05 : W > H * 1.25;
+    this.spread = canSpread && (this.layoutPref === 'double' || (this.layoutPref !== 'single' && autoSpread));
+    if (this.el.layoutBtn) {
+      this.el.layoutBtn.hidden = !canSpread;
+      this.el.layoutBtn.setAttribute('aria-pressed', String(this.spread));
+      this.el.layoutBtn.title = this.spread ? 'Show one page' : 'Show two pages';
+    }
+    const cols = this.spread ? 2 : 1;
+    let pw = (W - mx * 2) / cols;
+    let ph = pw / aspect;
+    if (ph > H - my * 2) { ph = H - my * 2; pw = ph * aspect; }
     const max = this.renderer?.maxTex || 4096;
     let scale = dpr;
     if (pw * scale > max || ph * scale > max) scale = Math.min(max / pw, max / ph);
 
     this.dpr = scale;
-    this.css = { x: (W - pw) / 2, y: (H - ph) / 2, w: pw, h: ph };
+    // In a spread, x is the spine (the left edge of the right-hand page).
+    this.css = { x: this.spread ? W / 2 : (W - pw) / 2, y: (H - ph) / 2, w: pw, h: ph };
     this.dev = {
       x: Math.round(this.css.x * scale),
       y: Math.round(this.css.y * scale),
@@ -123,15 +138,18 @@ export class Reader {
 
   _relayout() {
     if (!this.doc) return;
+    if (this.turn || this.anim) { this.pendingLayout = true; return; }
     const prev = this.dev && `${this.dev.w}x${this.dev.h}`;
+    const wasSpread = this.spread;
     this._layout();
+    if (wasSpread !== this.spread) this._updateChrome();
     if (prev !== `${this.dev.w}x${this.dev.h}`) {
       this.generation++;
       this.cache.clear();
       this.queued.clear();
       this._render(this.page).then(() => this._draw());
-      this._prefetch();
     }
+    this._prefetch();
     this._draw();
   }
 
@@ -143,7 +161,7 @@ export class Reader {
     const job = async () => {
       if (this.destroyed || gen !== this.generation) return null;
       if (this.cache.has(n)) return this.cache.get(n);
-      if (Math.abs(n - this.page) > 3) { this.queued.delete(n); return null; }
+      if (!this._inWindow(n)) { this.queued.delete(n); return null; }
       const { w, h } = this.dev;
       const page = await this.doc.getPage(n);
       const base = page.getViewport({ scale: 1 });
@@ -173,8 +191,26 @@ export class Reader {
     return p;
   }
 
+  /** Left/right pages of the spread containing page p. The cover sits alone on the right (L = 0). */
+  _pages(p = this.page) {
+    const L = p - (p % 2);
+    return { L, R: L + 1 };
+  }
+
+  _exists(n) {
+    return n >= 1 && n <= this.numPages;
+  }
+
+  _inWindow(n) {
+    if (!this.spread) return n >= this.page - 2 && n <= this.page + 3;
+    const { L, R } = this._pages();
+    return n >= L - 2 && n <= R + 2;
+  }
+
   _prefetch() {
-    for (const n of [this.page + 1, this.page - 1, this.page + 2]) {
+    const { L, R } = this._pages();
+    const order = this.spread ? [L, R, R + 1, R + 2, L - 1, L - 2] : [this.page, this.page + 1, this.page - 1, this.page + 2];
+    for (const n of order) {
       if (n >= 1 && n <= this.numPages && !this.cache.has(n) && !this.queued.has(n)) {
         this._render(n).then(() => this._draw());
       }
@@ -182,7 +218,7 @@ export class Reader {
   }
 
   _evict() {
-    for (const n of this.cache.keys()) if (n < this.page - 2 || n > this.page + 3) this.cache.delete(n);
+    for (const n of this.cache.keys()) if (!this._inWindow(n)) this.cache.delete(n);
   }
 
   _draw() {
@@ -193,22 +229,63 @@ export class Reader {
       return;
     }
     const { w, h } = this.dev;
-    if (this.turn) {
-      const { dir, C, F } = this.turn;
-      const frontPage = dir > 0 ? this.page : this.page - 1;
-      const underPage = dir > 0 ? this.page + 1 : this.page;
-      this.renderer.setTexture(0, this.cache.get(frontPage) || null);
-      this.renderer.setTexture(1, this.cache.get(underPage) || null);
-      this.renderer.draw(this.dev, curlFromCorner(C, F, w, h), this.dpr);
-    } else {
-      this.renderer.setTexture(1, this.cache.get(this.page) || null);
-      this.renderer.draw(this.dev, null, this.dpr);
+    const tex = (n) => (this._exists(n) && this.cache.get(n)) || null;
+    const curl = this.turn ? curlFromCorner(this.turn.C, this.turn.F, w, h) : null;
+    if (!this.spread) {
+      if (this.turn) {
+        const { dir } = this.turn;
+        this.renderer.setTexture(0, tex(dir > 0 ? this.page : this.page - 1));
+        this.renderer.setTexture(1, tex(dir > 0 ? this.page + 1 : this.page));
+      } else {
+        this.renderer.setTexture(1, tex(this.page));
+      }
+      this.renderer.draw(this.dev, curl, this.dpr);
+      return;
     }
+    // Two-page spread. A sheet carries an odd page on its front (right side) and the
+    // following even page on its back. Turning backwards is drawn mirrored about the spine.
+    const { L, R } = this._pages();
+    const flip = !!this.turn && this.turn.dir < 0;
+    let front = null, under = R, back = null, opposite = L;
+    if (this.turn) {
+      if (flip) { front = L; back = L - 1; under = L - 2; opposite = R; }
+      else { front = R; back = R + 1; under = R + 2; opposite = L; }
+    }
+    this.renderer.setTexture(0, tex(front));
+    this.renderer.setTexture(1, tex(under));
+    this.renderer.setTexture(2, tex(back));
+    this.renderer.setTexture(3, tex(opposite));
+    this.renderer.draw(this.dev, curl, this.dpr, {
+      spread: true,
+      flip,
+      hasUnder: this._exists(under),
+      hasLeft: this._exists(opposite),
+      shadowX: [this._exists(L) ? -w : 0, this._exists(R) ? w : 0],
+    });
   }
 
   // ---------------------------------------------------------------- navigation
   _canTurn(dir) {
-    return !!this.doc && (dir > 0 ? this.page < this.numPages : this.page > 1);
+    if (!this.doc) return false;
+    if (this.spread) {
+      const { L, R } = this._pages();
+      return dir > 0 ? R + 1 <= this.numPages : L >= 2;
+    }
+    return dir > 0 ? this.page < this.numPages : this.page > 1;
+  }
+
+  /** The page shown after turning in direction dir. */
+  _afterTurn(dir) {
+    if (!this.spread) return this.page + dir;
+    const { L } = this._pages();
+    return Math.max(1, L + 2 * dir);
+  }
+
+  /** Pages that need to be ready before a turn in direction dir can be drawn. */
+  _turnPages(dir) {
+    if (!this.spread) return [dir > 0 ? this.page + 1 : this.page - 1];
+    const { L, R } = this._pages();
+    return dir > 0 ? [R + 1, R + 2] : [L - 1, L - 2];
   }
 
   _beginTurn(dir, startY) {
@@ -219,8 +296,11 @@ export class Reader {
     else if (startY > h * 0.8) cy = h;
     const C = [w, cy];
     const turned = [-w, cy];
-    this.turn = { dir, C, turned, F: dir > 0 ? [...C] : [...turned] };
-    this._render(dir > 0 ? this.page + 1 : this.page - 1).then(() => this._draw());
+    // In a spread both directions lift the outer edge of a page (backwards is mirrored);
+    // on a single page, turning back pulls the previous page in from the left.
+    const fromC = this.spread || dir > 0;
+    this.turn = { dir, C, turned, F: fromC ? [...C] : [...turned] };
+    for (const n of this._turnPages(dir)) this._render(n).then(() => this._draw());
   }
 
   _setF(F) {
@@ -247,8 +327,9 @@ export class Reader {
           this.anim = null;
           const dir = this.turn.dir;
           this.turn = null;
-          if (commit) this._goto(this.page + dir, true);
+          if (commit) this._goto(this._afterTurn(dir), true);
           else this._draw();
+          if (this.pendingLayout) { this.pendingLayout = false; this._relayout(); }
           resolve();
         }
       };
@@ -261,8 +342,8 @@ export class Reader {
     if (this.anim || this.turn || this.drag || !this._canTurn(dir)) return;
     if (!this.renderer) return this._goto(this.page + dir);
     this._beginTurn(dir, this.dev.h * 0.62);
-    await this._render(dir > 0 ? this.page + 1 : this.page - 1);
-    const target = dir > 0 ? this.turn.turned : this.turn.C;
+    await Promise.all(this._turnPages(dir).map((n) => this._render(n)));
+    const target = this.spread || dir > 0 ? this.turn.turned : this.turn.C;
     await this._animateTo(target, 620, easeInOut, true, dir > 0 ? 0.07 : -0.07);
   }
 
@@ -280,8 +361,23 @@ export class Reader {
 
   _updateChrome() {
     this.el.scrubber.value = String(this.page);
-    const left = this.numPages - this.page;
-    this.el.label.textContent = `${this.page} of ${this.numPages}` + (left > 0 ? ` · ${left} page${left === 1 ? '' : 's'} left` : '');
+    let shown = String(this.page);
+    let last = this.page;
+    if (this.spread) {
+      const { L, R } = this._pages();
+      const a = Math.max(L, 1);
+      last = Math.min(R, this.numPages);
+      shown = a === last ? String(a) : `${a}–${last}`;
+    }
+    const left = this.numPages - last;
+    this.el.label.textContent = `${shown} of ${this.numPages}` + (left > 0 ? ` · ${left} page${left === 1 ? '' : 's'} left` : '');
+  }
+
+  _toggleLayout() {
+    if (this.turn || this.anim) return;
+    this.layoutPref = this.spread ? 'single' : 'double';
+    try { localStorage.setItem('bindr:layout', this.layoutPref); } catch {}
+    this._relayout();
   }
 
   _toggleChrome(force) {
@@ -297,6 +393,7 @@ export class Reader {
 
     this.root.querySelector('[data-action="close"]').onclick = () => this.onClose?.();
     this.root.querySelector('[data-action="goto"]').onclick = () => this._askPage();
+    if (this.el.layoutBtn) this.el.layoutBtn.onclick = () => this._toggleLayout();
     this.el.scrubber.addEventListener('input', () => {
       this.el.label.textContent = `Page ${this.el.scrubber.value} of ${this.numPages}`;
     });
@@ -363,7 +460,8 @@ export class Reader {
       this._toggleChrome(true);
     }
     const { C, turned, dir } = this.turn;
-    if (dir > 0) this._setF([C[0] + dx, C[1] + dy]);
+    if (this.spread) this._setF([C[0] + (dir > 0 ? dx : -dx), C[1] + dy]); // mirrored when turning back
+    else if (dir > 0) this._setF([C[0] + dx, C[1] + dy]);
     else this._setF([turned[0] + dx * 2, turned[1] + dy]);
   }
 
@@ -384,10 +482,17 @@ export class Reader {
     const { dir, F, C, turned } = this.turn;
     const { w } = this.dev;
     let commit;
-    if (cancelled) commit = false;
-    else if (dir > 0) commit = vx < -0.25 || (vx < 0.25 && F[0] < w * 0.55);
-    else commit = vx > 0.25 || (vx > -0.25 && F[0] > -w * 0.15);
-    const target = (dir > 0) === commit ? turned : C;
+    let target;
+    if (this.spread) {
+      const v = dir > 0 ? vx : -vx; // velocity in the sheet's own (possibly mirrored) frame
+      commit = !cancelled && (v < -0.25 || (v < 0.25 && F[0] < w * 0.35));
+      target = commit ? turned : C;
+    } else {
+      if (cancelled) commit = false;
+      else if (dir > 0) commit = vx < -0.25 || (vx < 0.25 && F[0] < w * 0.55);
+      else commit = vx > 0.25 || (vx > -0.25 && F[0] > -w * 0.15);
+      target = (dir > 0) === commit ? turned : C;
+    }
     const dist = Math.hypot(target[0] - F[0], target[1] - F[1]);
     const duration = Math.min(480, Math.max(160, (dist / (2 * w)) * 520));
     this._animateTo(target, duration, easeOutCubic, commit);
@@ -395,6 +500,13 @@ export class Reader {
 
   _tap([x]) {
     const { w } = this.dev;
+    if (this.spread) {
+      // x is measured from the spine: tap the outer half of either page to turn.
+      if (x > w * 0.5) this.turnPage(1);
+      else if (x < -w * 0.5) this.turnPage(-1);
+      else this._toggleChrome();
+      return;
+    }
     if (x > w * 0.68) this.turnPage(1);
     else if (x < w * 0.32) this.turnPage(-1);
     else this._toggleChrome();
