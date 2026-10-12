@@ -2,6 +2,7 @@ import { api } from './api.js';
 import { openPdf } from './pdf.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
+import { FilterPanel, toGL, toSvgValues, isIdentity } from './filters.js';
 import { esc, sheet, toast } from './ui.js';
 
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
@@ -47,6 +48,12 @@ export class Reader {
       this.el.fallback.hidden = false;
     }
     this._bind();
+    this.filterPanel = new FilterPanel(
+      this.root.querySelector('.filter-panel'),
+      this.root.querySelector('[data-action="filter"]'),
+      (t) => this._applyFilter(t),
+    );
+    this._applyFilter(this.filterPanel.transform);
 
     let data;
     try {
@@ -83,12 +90,32 @@ export class Reader {
     this.narrator?.destroy();
     cancelAnimationFrame(this.raf);
     clearTimeout(this.chromeTimer);
+    clearTimeout(this.tapTimer);
     this.resizeObserver?.disconnect();
     window.removeEventListener('keydown', this._onKey);
     this.doc?.destroy();
     this.cache.clear();
     const lose = this.renderer?.gl.getExtension('WEBGL_lose_context');
     lose?.loseContext();
+  }
+
+  // ---------------------------------------------------------------- color filter
+  _applyFilter(t) {
+    if (this.renderer) {
+      const g = toGL(t);
+      this.renderer.setFilter(g.m, g.o);
+      this._draw();
+      return;
+    }
+    // No WebGL: an SVG color matrix on the flat page does the same job.
+    let svg = this.root.querySelector('.cm-svg');
+    if (!svg) {
+      this.root.insertAdjacentHTML('beforeend', '<svg class="cm-svg" width="0" height="0" style="position:absolute" aria-hidden="true">'
+        + '<filter id="bindr-cm" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter></svg>');
+      svg = this.root.querySelector('.cm-svg');
+    }
+    svg.querySelector('feColorMatrix').setAttribute('values', toSvgValues(t));
+    this.el.fallback.style.filter = isIdentity(t) ? '' : 'url(#bindr-cm)';
   }
 
   // ---------------------------------------------------------------- layout
@@ -112,7 +139,11 @@ export class Reader {
     }
     let pw;
     let ph;
-    if (this.spread) {
+    if (this.zoom) {
+      // Zoomed in (double-tap): fill the width and scroll vertically.
+      pw = this.spread ? W / 2 : W;
+      ph = pw / aspect;
+    } else if (this.spread) {
       // As large as possible while the whole spread stays on screen, with a slim margin.
       // (If a forced spread is ever taller than the screen, it scrolls vertically.)
       const m = 10;
@@ -466,6 +497,7 @@ export class Reader {
       else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); this.turnPage(-1); }
       else if (e.key === 'Home') this._goto(1);
       else if (e.key === 'End') this._goto(this.numPages);
+      else if (e.key === 'z' || e.key === 'Z') this.toggleZoom();
       else if (e.key === 'Escape') this.onClose?.();
     };
     window.addEventListener('keydown', this._onKey);
@@ -548,7 +580,7 @@ export class Reader {
     if (!d.active) {
       if (cancelled || d.dead) return;
       const moved = Math.hypot(d.last[0] - d.start[0], d.last[1] - d.start[1]);
-      if (moved < 10 * this.dpr && performance.now() - d.t0 < 500) this._tap(d.start);
+      if (moved < 10 * this.dpr && performance.now() - d.t0 < 500) this._tapOrDoubleTap(d.start, e.clientY);
       return;
     }
     const s = d.samples;
@@ -572,6 +604,44 @@ export class Reader {
     const dist = Math.hypot(target[0] - F[0], target[1] - F[1]);
     const duration = Math.min(480, Math.max(160, (dist / (2 * w)) * 520));
     this._animateTo(target, duration, easeOutCubic, commit);
+  }
+
+  /** Single taps wait briefly so a second tap can make it a double-tap (zoom). */
+  _tapOrDoubleTap(p, clientY) {
+    const now = performance.now();
+    const last = this.lastTap;
+    if (last && now - last.t < 320 && Math.hypot(p[0] - last.p[0], p[1] - last.p[1]) < 48 * this.dpr) {
+      clearTimeout(this.tapTimer);
+      this.lastTap = null;
+      this.toggleZoom(clientY);
+      return;
+    }
+    this.lastTap = { t: now, p };
+    clearTimeout(this.tapTimer);
+    this.tapTimer = setTimeout(() => { this.lastTap = null; this._tap(p); }, 260);
+  }
+
+  /** Toggle between fitting the whole page/spread on screen and fitting the width. */
+  toggleZoom(clientY) {
+    if (!this.doc || this.turn || this.anim) return;
+    const r = this.el.stage.getBoundingClientRect();
+    const y = clientY == null ? r.height / 2 : clientY - r.top;
+    const frac = Math.min(1, Math.max(0, (y - this.css.y) / this.css.h)); // keep this spot under the finger
+    const before = this.css.w;
+    this.zoom = !this.zoom;
+    this._relayout();
+    if (this.zoom && Math.abs(this.css.w - before) < 2) {
+      this.zoom = false;
+      this._relayout();
+      toast('The page already fills the width of the screen.');
+      return;
+    }
+    if (this.overflow) {
+      this.scrollY = Math.min(this.overflow, Math.max(0, frac * this.css.h - y));
+      this._applyScroll();
+      this._draw();
+    }
+    this.root.classList.toggle('zoomed', this.zoom);
   }
 
   _tap([x]) {

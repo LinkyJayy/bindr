@@ -32,6 +32,8 @@ uniform vec2  uShadowX;     // horizontal extent of the visible pages, for the d
 uniform vec3  uBg;
 uniform vec3  uPaperBack;   // tint of the reverse side of the paper (single page)
 uniform float uDpr;
+uniform mat3  uCM;          // color filter: matrix…
+uniform vec3  uCO;          // …and offset, applied to the page content only
 
 const float PI = 3.14159265;
 
@@ -48,15 +50,16 @@ vec2 uvOf(vec2 p) {
   if (uFlip > 0.5) uv.x = 1.0 - uv.x;
   return uv;
 }
-vec3 front(vec2 p) { return texture2D(uFront, uvOf(p)).rgb; }
-vec3 under(vec2 p) { return texture2D(uUnder, uvOf(p)).rgb; }
-vec3 leftPage(vec2 p) { return texture2D(uLeft, uvOf(p + vec2(uPage.z, 0.0))).rgb; }
+vec3 filt(vec3 c) { return clamp(uCM * c + uCO, 0.0, 1.0); }
+vec3 front(vec2 p) { return filt(texture2D(uFront, uvOf(p)).rgb); }
+vec3 under(vec2 p) { return filt(texture2D(uUnder, uvOf(p)).rgb); }
+vec3 leftPage(vec2 p) { return filt(texture2D(uLeft, uvOf(p + vec2(uPage.z, 0.0))).rgb); }
 // Reverse side of the sheet. In a spread it's the next page; on a single page
 // the print shows through faintly, mirrored (sampling at the original position
 // does the mirroring for us).
 vec3 backSide(vec2 p) {
-  if (uSpread > 0.5) return texture2D(uBack, uvOf(vec2(uPage.z - p.x, p.y))).rgb;
-  return mix(front(p), uPaperBack, 0.86);
+  if (uSpread > 0.5) return filt(texture2D(uBack, uvOf(vec2(uPage.z - p.x, p.y))).rgb);
+  return mix(front(p), filt(uPaperBack), 0.86);
 }
 // Shading where the pages dip into the binding.
 float gutter(float sx) {
@@ -199,7 +202,7 @@ export class CurlRenderer {
 
     this.u = {};
     for (const n of ['uFront', 'uUnder', 'uBack', 'uLeft', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive',
-      'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr']) {
+      'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr', 'uCM', 'uCO']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     // Texture units, in slot order.
@@ -239,6 +242,11 @@ export class CurlRenderer {
     }
   }
 
+  /** Color filter: m = column-major 3×3 (Float32Array), o = offset [r, g, b]. */
+  setFilter(m, o) {
+    this.filter = { m, o };
+  }
+
   setColors(bg, paperBack) {
     this.bg = bg;
     this.paperBack = paperBack;
@@ -260,6 +268,9 @@ export class CurlRenderer {
     gl.uniform3fv(this.u.uBg, this.bg);
     gl.uniform3fv(this.u.uPaperBack, this.paperBack);
     gl.uniform1f(this.u.uDpr, dpr);
+    const f = this.filter || { m: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), o: [0, 0, 0] };
+    gl.uniformMatrix3fv(this.u.uCM, false, f.m);
+    gl.uniform3fv(this.u.uCO, f.o);
     gl.uniform1f(this.u.uSpread, opts.spread ? 1 : 0);
     gl.uniform1f(this.u.uFlip, opts.flip ? 1 : 0);
     gl.uniform1f(this.u.uHasUnder, opts.hasUnder === false ? 0 : 1);
