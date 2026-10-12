@@ -1,6 +1,7 @@
 import { api } from './api.js';
 import { openPdf } from './pdf.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
+import { Narrator } from './narrator.js';
 import { esc, sheet, toast } from './ui.js';
 
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
@@ -72,12 +73,14 @@ export class Reader {
     this.el.loading.hidden = true;
     this._draw();
     this._prefetch();
+    if (Narrator.supported) this.narrator = new Narrator(this, this.root);
     this.chromeTimer = setTimeout(() => this.root.classList.add('chrome-hidden'), 2200);
     if (this.book.pageCount !== this.numPages) this.onProgress?.(this.page, this.numPages);
   }
 
   destroy() {
     this.destroyed = true;
+    this.narrator?.destroy();
     cancelAnimationFrame(this.raf);
     clearTimeout(this.chromeTimer);
     this.resizeObserver?.disconnect();
@@ -107,33 +110,74 @@ export class Reader {
       this.el.layoutBtn.setAttribute('aria-pressed', String(this.spread));
       this.el.layoutBtn.title = this.spread ? 'Show one page' : 'Show two pages';
     }
-    const cols = this.spread ? 2 : 1;
-    let pw = (W - mx * 2) / cols;
-    let ph = pw / aspect;
-    if (ph > H - my * 2) { ph = H - my * 2; pw = ph * aspect; }
+    let pw;
+    let ph;
+    if (this.spread) {
+      // The spread fills the full width of the screen; if that makes it taller than the
+      // screen, it scrolls vertically.
+      pw = W / 2;
+      ph = pw / aspect;
+    } else {
+      pw = W - mx * 2;
+      ph = pw / aspect;
+      if (ph > H - my * 2) { ph = H - my * 2; pw = ph * aspect; }
+    }
     const max = this.renderer?.maxTex || 4096;
     let scale = dpr;
     if (pw * scale > max || ph * scale > max) scale = Math.min(max / pw, max / ph);
+    // Keep each page texture to a sensible size (several are cached at once).
+    scale = Math.min(scale, Math.max(1, Math.sqrt(4.5e6 / (pw * ph))));
 
     this.dpr = scale;
+    this.stageH = H;
+    this.overflow = Math.max(0, ph - H);
+    this.scrollY = Math.min(this.scrollY || 0, this.overflow);
     // In a spread, x is the spine (the left edge of the right-hand page).
-    this.css = { x: this.spread ? W / 2 : (W - pw) / 2, y: (H - ph) / 2, w: pw, h: ph };
+    this.css = { x: this.spread ? W / 2 : (W - pw) / 2, y: 0, w: pw, h: ph };
     this.dev = {
       x: Math.round(this.css.x * scale),
-      y: Math.round(this.css.y * scale),
+      y: 0,
       w: Math.round(pw * scale),
       h: Math.round(ph * scale),
     };
+    this._applyScroll();
     if (this.renderer) {
       this.el.canvas.width = Math.round(W * scale);
       this.el.canvas.height = Math.round(H * scale);
       const bg = getComputedStyle(this.root).backgroundColor.match(/\d+(\.\d+)?/g)?.map(Number) || [239, 239, 239];
       this.renderer.setColors(bg.slice(0, 3).map((v) => v / 255), [0.985, 0.98, 0.97]);
     } else {
-      Object.assign(this.el.fallback.style, {
-        left: `${this.css.x}px`, top: `${this.css.y}px`, width: `${pw}px`, height: `${ph}px`,
-      });
+      Object.assign(this.el.fallback.style, { left: `${this.css.x}px`, width: `${pw}px`, height: `${ph}px` });
     }
+  }
+
+  /** Vertical position of the page(s): centred, or scrolled when taller than the screen. */
+  _applyScroll() {
+    this.css.y = this.overflow > 0 ? -this.scrollY : (this.stageH - this.css.h) / 2;
+    this.dev.y = Math.round(this.css.y * this.dpr);
+    if (!this.renderer) this.el.fallback.style.top = `${this.css.y}px`;
+  }
+
+  /** Scroll by dy css px. Returns false when there's nothing to scroll. */
+  scrollBy(dy) {
+    if (!this.overflow) return false;
+    const y = Math.min(this.overflow, Math.max(0, this.scrollY + dy));
+    if (y !== this.scrollY) {
+      this.scrollY = y;
+      this._applyScroll();
+      this._draw();
+    }
+    return true;
+  }
+
+  /** Scroll so that the css-px range [top, bottom] (relative to the page top) is on screen. */
+  scrollIntoView(top, bottom) {
+    if (!this.overflow || this.turn) return;
+    const margin = 90;
+    const viewTop = this.scrollY + margin;
+    const viewBottom = this.scrollY + this.stageH - margin;
+    if (top < viewTop) this.scrollBy(top - viewTop);
+    else if (bottom > viewBottom) this.scrollBy(Math.min(bottom - viewBottom, top - viewTop));
   }
 
   _relayout() {
@@ -197,6 +241,13 @@ export class Reader {
     return { L, R: L + 1 };
   }
 
+  /** Pages currently on screen, in reading order. */
+  visiblePages() {
+    if (!this.spread) return [this.page];
+    const { L, R } = this._pages();
+    return [L, R].filter((n) => this._exists(n));
+  }
+
   _exists(n) {
     return n >= 1 && n <= this.numPages;
   }
@@ -223,6 +274,7 @@ export class Reader {
 
   _draw() {
     if (this.destroyed || !this.dev) return;
+    this.narrator?.updateHighlight();
     if (!this.renderer) {
       const c = this.cache.get(this.page);
       if (c && this.el.fallback.firstChild !== c) this.el.fallback.replaceChildren(c);
@@ -349,7 +401,10 @@ export class Reader {
 
   _goto(n, fromTurn = false) {
     n = Math.min(Math.max(1, n), this.numPages);
+    const changed = n !== this.page;
     this.page = n;
+    if (changed && this.overflow) { this.scrollY = 0; this._applyScroll(); }
+    if (changed) this.narrator?.pageChanged();
     this._updateChrome();
     this._evict();
     if (this.cache.has(n)) this._draw();
@@ -403,7 +458,9 @@ export class Reader {
 
     this._onKey = (e) => {
       if (document.querySelector('.sheet-backdrop') || e.target.closest?.('input')) return;
-      if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); this.turnPage(1); }
+      if (e.key === 'ArrowDown' && this.scrollBy(80)) e.preventDefault();
+      else if (e.key === 'ArrowUp' && this.scrollBy(-80)) e.preventDefault();
+      else if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); this.turnPage(1); }
       else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); this.turnPage(-1); }
       else if (e.key === 'Home') this._goto(1);
       else if (e.key === 'End') this._goto(this.numPages);
@@ -415,7 +472,12 @@ export class Reader {
     stage.addEventListener('wheel', (e) => {
       e.preventDefault();
       const now = Date.now();
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      const vertical = Math.abs(e.deltaY) >= Math.abs(e.deltaX);
+      if (vertical && this.overflow && !this.turn) {
+        this.scrollBy(e.deltaMode === 1 ? e.deltaY * 32 : e.deltaY);
+        return;
+      }
+      const delta = vertical ? e.deltaY : e.deltaX;
       if (now < wheelLock || Math.abs(delta) < 12) return;
       wheelLock = now + 450;
       this.turnPage(delta > 0 ? 1 : -1);
@@ -450,8 +512,20 @@ export class Reader {
     while (d.samples.length > 2 && now - d.samples[0][0] > 100) d.samples.shift();
     const dx = p[0] - d.start[0];
     const dy = p[1] - d.start[1];
+    if (d.scrolling) {
+      this.scrollBy(d.clientY - e.clientY);
+      d.clientY = e.clientY;
+      return;
+    }
     if (!d.active) {
-      if (Math.hypot(dx, dy) < 8 * this.dpr || Math.abs(dx) < Math.abs(dy) * 0.8) return;
+      if (Math.hypot(dx, dy) < 8 * this.dpr) return;
+      if (this.overflow && Math.abs(dy) > Math.abs(dx)) {
+        d.scrolling = true;
+        d.clientY = e.clientY;
+        this.scrollBy(-dy / this.dpr);
+        return;
+      }
+      if (Math.abs(dx) < Math.abs(dy) * 0.8) return;
       const dir = dx < 0 ? 1 : -1;
       if (!this._canTurn(dir) || !this.renderer) { d.dead = true; return; }
       if (d.dead) return;
