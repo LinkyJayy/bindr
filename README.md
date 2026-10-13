@@ -4,7 +4,7 @@ A cloud PDF library with a realistic, Apple Books–style **curl** page turn.
 Installable as a PWA and ready to deploy on Railway.
 
 - **E-reader style interface.** A clean black-and-white look inspired by e-ink readers. The Home page has a search bar, a ⋮ menu (Sync, Add Books, Ratings & Reviews, Settings, Help), quick settings under the clock (Dark Mode, Sync, Add Books, All Settings), a "Jump Back In" card and shelves of your books. The Library has All / Reading / Unread / Finished / Rated filters, sorting, and grid or list view, and the bottom bar holds Home, the book you last read, and Library.
-- **Accounts.** Email/password sign-up with secure, httpOnly session cookies and bcrypt-hashed passwords. Email addresses are verified with a 6-digit code, and **Forgot password?** on the sign-in screen resets a password by emailing a code (see [Email](#email)).
+- **Accounts.** Email/password sign-up with secure, httpOnly session cookies and bcrypt-hashed passwords. Email addresses are verified with a 6-digit code, and **Forgot password?** on the sign-in screen resets a password with the account's **recovery key** (no email needed) or an emailed code (see [Email](#email)). Every new account gets a recovery key to save; it's shown once and replaced each time it's used. Older accounts can create one in Settings → Recovery Key.
 - **Cloud library.** Uploaded PDFs, covers and reading progress are stored on the server, so they follow you to every device.
 - **Upload.** Use the **+** button, or drag and drop PDF or **ePUB** files onto the window. Bindr reads each book's title, author and cover before uploading. ePUBs are laid out by Bindr's own text engine, so the page curl, highlights, read-aloud, dark pages and the dictionary all work with them.
 - **Custom names.** You choose each book's title and author before it uploads. Change them any time with **••• → Rename / Edit Details**.
@@ -65,6 +65,6 @@ Bindr emails 6-digit codes to verify addresses and to reset passwords. Set up on
 
 With an email service set up, everyone must verify their email before using Bindr. Existing accounts are asked to verify the next time they open the app.
 
-Without one, verification is optional and codes are written to the server log (Railway → Deployments → Logs) instead of being emailed. That's enough for the owner to verify their own account.
+Bindr works fine with no email service at all: people reset forgotten passwords with their recovery key. Without one, verification is optional and codes are written to the server log (Railway → Deployments → Logs) instead of being emailed. That's enough for the owner to verify their own account.
 
 Editing the About page always needs a verified email, so signing up with the owner's address isn't enough to edit it. If someone else registered with your address, use **Forgot password?**: proving you receive the email resets the password, verifies the account and signs everyone else out of it.

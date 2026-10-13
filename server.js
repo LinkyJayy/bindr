@@ -88,8 +88,10 @@ db.exec(`
   add('location', 'INTEGER');                          // ePUB reading position (character offset)
   add('chapters', 'TEXT');                             // chapters the reader added: JSON [{title, page, loc}]
 }
-if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'email_verified')) {
-  db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
+{
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!cols.includes('email_verified')) db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
+  if (!cols.includes('recovery_hash')) db.exec('ALTER TABLE users ADD COLUMN recovery_hash TEXT'); // sha256 of the recovery key
 }
 
 db.exec(`
@@ -141,18 +143,19 @@ fs.rm(path.join(DATA_DIR, 'store'), { recursive: true, force: true }, () => {});
 
 const q = {
   userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
-  userById: db.prepare('SELECT id, email, name, created_at, email_verified FROM users WHERE id = ?'),
+  userById: db.prepare('SELECT id, email, name, created_at, email_verified, recovery_hash IS NOT NULL AS has_recovery FROM users WHERE id = ?'),
   insertUser: db.prepare('INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)'),
   updateUserName: db.prepare('UPDATE users SET name = ? WHERE id = ?'),
   updateUserPassword: db.prepare('UPDATE users SET password_hash = ? WHERE id = ?'),
   insertSession: db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)'),
   sessionUser: db.prepare(`
-    SELECT u.id, u.email, u.name, u.created_at, u.email_verified FROM sessions s JOIN users u ON u.id = s.user_id
+    SELECT u.id, u.email, u.name, u.created_at, u.email_verified, u.recovery_hash IS NOT NULL AS has_recovery FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`),
   deleteSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
   deleteUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?'),
   deleteAllUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ?'),
   setVerified: db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?'),
+  setRecovery: db.prepare('UPDATE users SET recovery_hash = ? WHERE id = ?'),
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
   listBooks: db.prepare(`SELECT * FROM books WHERE user_id = ?
     ORDER BY COALESCE(last_opened_at, created_at) DESC`),
@@ -246,6 +249,7 @@ function userJson(u) {
   return {
     id: u.id, email: u.email, name: u.name, created_at: u.created_at,
     verified: !!u.email_verified,
+    hasRecoveryKey: !!u.has_recovery,
     mustVerify: REQUIRE_VERIFY && !u.email_verified,
   };
 }
@@ -323,6 +327,25 @@ function useCode(user, purpose, input) {
   db.prepare('UPDATE email_codes SET expires_at = 0 WHERE user_id = ? AND purpose = ?').run(user.id, purpose);
 }
 
+// --- recovery keys ---------------------------------------------------------------
+// A recovery key resets a forgotten password without email. It's shown once, only its
+// hash is stored, and each use (or new key) replaces the old one.
+const KEY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O, U
+const normalizeKey = (k) => String(k ?? '').toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1').replace(/[^0-9A-Z]/g, '');
+
+/** Makes a new 100-bit key for the account and returns it, e.g. 7KQ2M-X9D4T-…. */
+function newRecoveryKey(userId) {
+  const chars = [...crypto.randomBytes(20)].map((b) => KEY_ALPHABET[b & 31]).join('');
+  q.setRecovery.run(sha256(`recovery:${chars}`), userId);
+  return chars.match(/.{5}/g).join('-');
+}
+
+function recoveryKeyMatches(user, input) {
+  const key = normalizeKey(input);
+  if (!user?.recovery_hash || key.length !== 20) return false;
+  return crypto.timingSafeEqual(Buffer.from(sha256(`recovery:${key}`)), Buffer.from(user.recovery_hash));
+}
+
 const sendError = (res, err) => {
   if (!err.status) throw err;
   res.status(err.status).json({ error: err.message });
@@ -372,11 +395,12 @@ app.post('/api/auth/register', rateLimit, async (req, res) => {
   }
   const id = newId();
   q.insertUser.run(id, email, name, await bcrypt.hash(password, 12), Date.now());
+  const recoveryKey = newRecoveryKey(id);
   startSession(res, id);
   const user = q.userById.get(id);
   let delivery = null;
   if (REQUIRE_VERIFY || isAdminEmail(email)) delivery = await issueCode(user, 'verify').catch(() => null);
-  res.status(201).json({ user: userJson(user), delivery });
+  res.status(201).json({ user: userJson(user), delivery, recoveryKey });
 });
 
 app.post('/api/auth/login', rateLimit, async (req, res) => {
@@ -431,8 +455,28 @@ app.post('/api/auth/reset', rateLimit, async (req, res) => {
   q.updateUserPassword.run(await bcrypt.hash(password, 12), user.id);
   q.setVerified.run(user.id);
   q.deleteAllUserSessions.run(user.id); // sign out everyone else using the account
+  // A new recovery key too, so whoever had the account before can't use the old one.
+  const recoveryKey = newRecoveryKey(user.id);
   startSession(res, user.id);
-  res.json({ user: userJson(q.userById.get(user.id)) });
+  res.json({ user: userJson(q.userById.get(user.id)), recoveryKey });
+});
+
+// Forgot password, without email: the account's recovery key sets a new password.
+// The key is used up and a new one is returned.
+app.post('/api/auth/recover', rateLimit, async (req, res) => {
+  const email = cleanText(req.body?.email, 200).toLowerCase();
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const user = q.userByEmail.get(email);
+  if (!recoveryKeyMatches(user, req.body?.key)) {
+    return res.status(400).json({ error: 'That email and recovery key don\'t match.' });
+  }
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  if (password.length > 200) return res.status(400).json({ error: 'Password is too long.' });
+  q.updateUserPassword.run(await bcrypt.hash(password, 12), user.id);
+  q.deleteAllUserSessions.run(user.id);
+  const recoveryKey = newRecoveryKey(user.id);
+  startSession(res, user.id);
+  res.json({ user: userJson(q.userById.get(user.id)), recoveryKey });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -461,6 +505,16 @@ app.patch('/api/me', authAny, async (req, res) => {
     q.deleteUserSessions.run(req.user.id, req.tokenHash);
   }
   res.json({ user: userJson(q.userById.get(req.user.id)) });
+});
+
+// Makes a new recovery key (the old one stops working). Needs the password.
+app.post('/api/me/recovery-key', rateLimit, authAny, async (req, res) => {
+  const full = q.userByEmail.get(req.user.email);
+  if (!(await bcrypt.compare(String(req.body?.password || ''), full.password_hash))) {
+    return res.status(400).json({ error: 'Password is incorrect.' });
+  }
+  const recoveryKey = newRecoveryKey(req.user.id);
+  res.json({ user: userJson(q.userById.get(req.user.id)), recoveryKey });
 });
 
 app.delete('/api/me', authAny, async (req, res) => {

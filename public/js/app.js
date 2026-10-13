@@ -53,9 +53,10 @@ onNeedsVerification(() => {
 });
 
 /** Saves the signed-in account and opens the app (or the verify screen first). */
-async function signedIn(user, { delivery = null } = {}) {
+async function signedIn(user, { delivery = null, recoveryKey = null, keyIntro } = {}) {
   state.user = user;
   localStorage.setItem('bindr:user', JSON.stringify(user));
+  if (recoveryKey) return showRecoveryKey(recoveryKey, () => signedIn(user, { delivery }), { intro: keyIntro });
   if (user.mustVerify) return showVerify({ delivery });
   // The owner's account gets a code even when verification is optional.
   if (delivery && !user.verified) return showVerify({ delivery, optional: true });
@@ -114,10 +115,10 @@ function showAuth() {
     submit.disabled = true;
     try {
       const { email, password, name } = form;
-      const { user, delivery } = mode === 'login'
+      const { user, delivery, recoveryKey } = mode === 'login'
         ? await api.login(email.value.trim(), password.value)
         : await api.register(name.value.trim(), email.value.trim(), password.value);
-      await signedIn(user, { delivery });
+      await signedIn(user, { delivery, recoveryKey });
     } catch (ex) {
       err.textContent = ex.message;
     } finally {
@@ -216,23 +217,29 @@ function showVerify({ delivery = null, optional = false } = {}) {
   form.code.focus();
 }
 
-/** Forgot password: email → code → new password. */
-function showReset(prefill = '') {
+/** Forgot password: with the recovery key, or with a code sent to the email address. */
+function showReset(prefill = '', mode = 'key') {
+  const byKey = mode === 'key';
   const view = authCard(`<h1>Reset password</h1>
-    <p class="auth-text">We'll email you a code to choose a new password.</p>
+    <p class="auth-text">${byKey
+      ? 'Enter your email and the recovery key you saved when you created your account.'
+      : 'We’ll send a code to your email to choose a new password.'}</p>
     <p class="auth-note" hidden></p>
     <form class="auth-form" novalidate>
       <label class="field"><span>Email</span>
         <input name="email" type="email" autocomplete="email" required placeholder="you@example.com" value="${esc(prefill)}"></label>
-      <div class="reset-step2" hidden>
-        <label class="field"><span>Code</span>
-          <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></label>
+      ${byKey ? `<label class="field"><span>Recovery key</span>
+        <input name="key" class="key-input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX"></label>` : ''}
+      <div class="reset-step2" ${byKey ? '' : 'hidden'}>
+        ${byKey ? '' : `<label class="field"><span>Code</span>
+          <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></label>`}
         <label class="field"><span>New password</span>
           <input name="password" type="password" autocomplete="new-password" minlength="8" placeholder="At least 8 characters"></label>
       </div>
       <p class="form-error" role="alert"></p>
-      <button class="btn primary block" type="submit">Email me a code</button>
+      <button class="btn primary block" type="submit">${byKey ? 'Reset Password' : 'Email me a code'}</button>
       <button class="auth-link" type="button" data-action="resend" hidden>Send a new code</button>
+      <button class="auth-link" type="button" data-action="switch">${byKey ? 'Lost your key? Use an email code' : 'Use my recovery key instead'}</button>
       <button class="auth-link" type="button" data-action="back">Back to sign in</button>
     </form>`);
   const form = view.querySelector('form');
@@ -251,25 +258,29 @@ function showReset(prefill = '') {
     view.querySelector('.reset-step2').hidden = false;
     resend.hidden = false;
     text.innerHTML = `If there's an account for <strong>${esc(form.email.value.trim())}</strong>, we've emailed it a 6-digit code. Enter it with your new password.`;
-    submit.textContent = 'Set new password';
+    submit.textContent = 'Set New Password';
     form.code.focus();
   };
   resend.onclick = async () => {
     err.textContent = '';
     try { await send(); toast('A new code is on its way.'); } catch (ex) { err.textContent = ex.message; }
   };
+  view.querySelector('[data-action="switch"]').onclick = () => showReset(form.email.value.trim(), byKey ? 'email' : 'key');
   view.querySelector('[data-action="back"]').onclick = () => showAuth();
-  form.code.oninput = () => { form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6); };
+  if (form.code) form.code.oninput = () => { form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6); };
   form.onsubmit = async (e) => {
     e.preventDefault();
     err.textContent = '';
     submit.disabled = true;
     try {
-      if (step === 1) await send();
+      if (!byKey && step === 1) await send();
       else {
-        const { user } = await api.resetPassword(form.email.value.trim(), form.code.value, form.password.value);
+        const email = form.email.value.trim();
+        const { user, recoveryKey } = byKey
+          ? await api.recover(email, form.key.value, form.password.value)
+          : await api.resetPassword(email, form.code.value, form.password.value);
         toast('Password changed. Other devices were signed out.');
-        await signedIn(user);
+        await signedIn(user, { recoveryKey, keyIntro: 'Your old recovery key no longer works. Save this new one in place of it.' });
       }
     } catch (ex) {
       err.textContent = ex.message;
@@ -278,6 +289,46 @@ function showReset(prefill = '') {
     }
   };
   form.email.focus();
+}
+
+/** Shows a new recovery key once; the person must confirm they saved it. */
+function showRecoveryKey(key, onDone, { intro } = {}) {
+  const view = authCard(`<h1>Save your recovery key</h1>
+    <p class="auth-text">${esc(intro || 'If you ever forget your password, this key lets you choose a new one.')}
+      Keep it somewhere safe, like a password manager or a note on paper. You won't see it again.</p>
+    <div class="recovery-key" aria-label="Recovery key">${esc(key)}</div>
+    <div class="recovery-actions">
+      <button class="btn" type="button" data-action="copy">Copy</button>
+      <button class="btn" type="button" data-action="download">Download</button>
+    </div>
+    <label class="check-row"><input type="checkbox" name="saved"> I've saved my recovery key</label>
+    <button class="btn primary block" type="button" data-action="done" disabled>Continue</button>`);
+  const done = view.querySelector('[data-action="done"]');
+  view.querySelector('[name="saved"]').onchange = (e) => { done.disabled = !e.target.checked; };
+  view.querySelector('[data-action="copy"]').onclick = async () => {
+    try { await navigator.clipboard.writeText(key); toast('Recovery key copied.'); } catch { toast('Couldn’t copy. Select the key and copy it yourself.'); }
+  };
+  view.querySelector('[data-action="download"]').onclick = () => {
+    const blob = new Blob([`Bindr recovery key for ${state.user?.email || 'your account'}\n\n${key}\n\nUse it under "Forgot password?" on the Bindr sign-in screen.\n`], { type: 'text/plain' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'bindr-recovery-key.txt' });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  done.onclick = () => onDone();
+}
+
+/** Settings: make a new recovery key (needs the password). */
+function createRecoveryKey() {
+  const had = state.user.hasRecoveryKey;
+  formSheet(had ? 'New Recovery Key' : 'Set Up Recovery Key',
+    `<p class="sub">${had ? 'Your current recovery key will stop working. ' : ''}Enter your password to continue.</p>
+     <label class="field"><span>Password</span><input name="pw" type="password" autocomplete="current-password" autofocus required></label>`,
+    'Continue', async (f) => {
+      const { user, recoveryKey } = await api.newRecoveryKey(f.pw.value);
+      state.user = user;
+      localStorage.setItem('bindr:user', JSON.stringify(user));
+      setTimeout(() => showRecoveryKey(recoveryKey, () => route()));
+    });
 }
 
 async function signOut() {
@@ -765,11 +816,29 @@ function renderShelf() {
   else if (state.view === 'settings') main.innerHTML = settingsHtml();
   else if (state.view === 'reviews') main.innerHTML = reviewsHtml();
   else if (state.view === 'about') main.innerHTML = aboutHtml();
-  else main.innerHTML = homeHtml();
+  else main.innerHTML = recoveryNotice() + homeHtml();
   bindCards(main);
+  main.querySelector('[data-notice="recovery"]')?.addEventListener('click', createRecoveryKey);
+  main.querySelector('[data-notice="dismiss"]')?.addEventListener('click', () => {
+    try { localStorage.setItem('bindr:recovery-dismissed', state.user.id); } catch {}
+    renderShelf();
+  });
   if (state.view === 'library' && !state.query.trim()) bindLibraryBar(main);
   if (state.view === 'settings' && !state.query.trim()) bindSettings(main);
   if (state.view === 'about' && !state.query.trim()) bindAbout(main);
+}
+
+/** Home: nudge accounts made before recovery keys existed to set one up. */
+function recoveryNotice() {
+  if (!state.user || state.user.hasRecoveryKey || state.user.hasRecoveryKey === undefined) return '';
+  try { if (localStorage.getItem('bindr:recovery-dismissed') === state.user.id) return ''; } catch {}
+  return `<section class="k-notice">
+    <div><strong>Set up a recovery key</strong><p>It lets you get back into your account if you forget your password.</p></div>
+    <div class="k-notice-actions">
+      <button class="btn" data-notice="dismiss">Not now</button>
+      <button class="btn primary" data-notice="recovery">Set Up</button>
+    </div>
+  </section>`;
 }
 
 function shelfRow(title, books, { link } = {}) {
@@ -908,6 +977,7 @@ function settingsHtml() {
       ${u.verified ? info('Email', u.email) : row('verify', 'Email', `${u.email} · Not verified`)}
       ${u.verified ? info('Email Status', 'Verified ✓') : ''}
       ${row('password', 'Change Password')}
+      ${row('recovery', 'Recovery Key', u.hasRecoveryKey ? 'Set up' : 'Not set up')}
       ${row('logout', 'Sign Out')}
     </div>
     <div class="k-group-title">Display</div>
@@ -936,6 +1006,7 @@ function bindSettings(main) {
     if (a === 'name') changeName();
     if (a === 'password') changePassword();
     if (a === 'verify') showVerify({ optional: true });
+    if (a === 'recovery') createRecoveryKey();
     if (a === 'logout') signOut();
     if (a === 'delete') deleteAccount();
     if (a === 'sync') syncLibrary();
