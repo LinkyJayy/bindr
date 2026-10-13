@@ -335,9 +335,66 @@ function detectFormat(file) {
   const head = readHead(file, 1024);
   // The %PDF header may be preceded by a little junk, which readers tolerate.
   if (head.includes(Buffer.from('%PDF-'))) return 'pdf';
-  // An ePUB is a ZIP whose first entry is an uncompressed "mimetype" file.
-  if (head[0] === 0x50 && head[1] === 0x4b && head.subarray(0, 120).includes(Buffer.from('application/epub+zip'))) return 'epub';
+  // An ePUB is a ZIP containing META-INF/container.xml. Real-world ePUBs don't always put
+  // the "mimetype" entry first (or store it uncompressed), so look at the ZIP's file list.
+  if (head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04) {
+    if (head.includes(Buffer.from('application/epub+zip'))) return 'epub';
+    try {
+      if (zipEntryNames(file).some((n) => n.toLowerCase() === 'meta-inf/container.xml')) return 'epub';
+    } catch (e) {
+      console.warn('Could not read ZIP directory:', e.message);
+    }
+  }
   return null;
+}
+
+/** File names in a ZIP archive, read from its central directory (supports ZIP64). */
+function zipEntryNames(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const read = (pos, len) => {
+      const buf = Buffer.alloc(len);
+      const n = fs.readSync(fd, buf, 0, len, pos);
+      return buf.subarray(0, n);
+    };
+    // End of central directory record: within the last 64 KiB + 22 bytes.
+    const tailLen = Math.min(size, 65557);
+    const tail = read(size - tailLen, tailLen);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('no end-of-central-directory record');
+    let count = tail.readUInt16LE(eocd + 10);
+    let cdSize = tail.readUInt32LE(eocd + 12);
+    let cdOffset = tail.readUInt32LE(eocd + 16);
+    if (cdOffset === 0xffffffff || cdSize === 0xffffffff || count === 0xffff) {
+      // ZIP64: the locator sits just before the EOCD record.
+      const loc = eocd - 20;
+      if (loc < 0 || tail.readUInt32LE(loc) !== 0x07064b50) throw new Error('bad zip64 locator');
+      const z64 = read(Number(tail.readBigUInt64LE(loc + 8)), 56);
+      if (z64.readUInt32LE(0) !== 0x06064b50) throw new Error('bad zip64 record');
+      count = Number(z64.readBigUInt64LE(32));
+      cdSize = Number(z64.readBigUInt64LE(40));
+      cdOffset = Number(z64.readBigUInt64LE(48));
+    }
+    if (cdSize > 64 * 1024 * 1024) throw new Error('central directory too large');
+    const cd = read(cdOffset, cdSize);
+    const names = [];
+    let p = 0;
+    for (let i = 0; i < count && p + 46 <= cd.length; i++) {
+      if (cd.readUInt32LE(p) !== 0x02014b50) break;
+      const nameLen = cd.readUInt16LE(p + 28);
+      const extraLen = cd.readUInt16LE(p + 30);
+      const commentLen = cd.readUInt16LE(p + 32);
+      names.push(cd.toString('utf8', p + 46, p + 46 + nameLen));
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return names;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 const upload = multer({

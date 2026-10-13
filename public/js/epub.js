@@ -93,6 +93,7 @@ export class EpubDoc {
   }
 
   _parseMeta() {
+    this._checkDrm();
     const container = this._xml('META-INF/container.xml');
     const rootfile = container?.getElementsByTagName('rootfile')[0];
     const opfPath = rootfile?.getAttribute('full-path');
@@ -120,6 +121,24 @@ export class EpubDoc {
     this.toc = [];
     if (nav) this._parseNav(nav.href);
     if (!this.toc.length && ncx) this._parseNcx(ncx.href);
+  }
+
+  /** DRM-protected ePUBs (most store-bought ones) list encrypted content in encryption.xml. */
+  _checkDrm() {
+    const enc = this._xml('META-INF/encryption.xml');
+    if (this._bytes('META-INF/rights.xml') && !enc) return; // rights without encryption: readable
+    if (!enc) return;
+    // Font obfuscation (IDPF/Adobe) is harmless; anything else encrypted means DRM.
+    const datas = [...enc.getElementsByTagNameNS('*', 'EncryptedData')];
+    const drm = datas.some((d) => {
+      const alg = d.getElementsByTagNameNS('*', 'EncryptionMethod')[0]?.getAttribute('Algorithm') || '';
+      const uri = d.getElementsByTagNameNS('*', 'CipherReference')[0]?.getAttribute('URI') || '';
+      const fontObfuscation = /idpf\.org\/2008\/embedding|ns\.adobe\.com\/pdf\/enc#RC/.test(alg);
+      return !fontObfuscation && !/\.(otf|ttf|woff2?)$/i.test(uri);
+    });
+    if (drm) {
+      throw new Error('This ePUB is protected by DRM (copy protection), so it can only be opened in the store’s own app. DRM-free ePUBs work in Bindr.');
+    }
   }
 
   _parseNav(path) {

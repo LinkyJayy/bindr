@@ -794,8 +794,18 @@ function renameBook(book) {
 
 // ------------------------------------------------------------------ upload
 async function startUpload(files) {
-  const isEpub = (f) => f.type === 'application/epub+zip' || /\.epub$/i.test(f.name);
-  const pdfs = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name) || isEpub(f));
+  // Some file pickers (Android in particular) give files no extension or type, so fall back
+  // to the file's first bytes: "%PDF" for PDF, "PK" (a ZIP) for ePUB.
+  const sniffed = new Map(await Promise.all(files.map(async (f) => {
+    if (/\.(pdf|epub)$/i.test(f.name) || ['application/pdf', 'application/epub+zip'].includes(f.type)) return [f, null];
+    try {
+      const head = new Uint8Array(await f.slice(0, 1024).arrayBuffer());
+      const text = String.fromCharCode(...head);
+      return [f, text.includes('%PDF-') ? 'pdf' : head[0] === 0x50 && head[1] === 0x4b ? 'epub' : null];
+    } catch { return [f, null]; }
+  })));
+  const isEpub = (f) => f.type === 'application/epub+zip' || /\.epub$/i.test(f.name) || sniffed.get(f) === 'epub';
+  const pdfs = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name) || isEpub(f) || sniffed.get(f) === 'pdf');
   if (pdfs.length < files.length) toast('Only PDF and ePUB books can be added.');
   if (!pdfs.length) return;
 
@@ -809,12 +819,14 @@ async function startUpload(files) {
       return { file, ...info, title: info.title || fallback, coverUrl: info.cover && URL.createObjectURL(info.cover) };
     } catch (e) {
       console.warn('Could not read PDF', file.name, e);
-      return { file, title: fallback, author: '', pageCount: 0, cover: null, broken: true };
+      return { file, title: fallback, author: '', pageCount: 0, cover: null, broken: true, error: e?.message };
     }
   }));
 
   const valid = items.filter((it) => !it.broken);
-  if (valid.length < items.length) toast(`${items.length - valid.length} file(s) could not be read as books.`);
+  const broken = items.filter((it) => it.broken);
+  if (broken.length === 1) toast(`“${broken[0].file.name}” couldn’t be read: ${broken[0].error || 'it doesn’t look like a PDF or ePUB.'}`);
+  else if (broken.length) toast(`${broken.length} files couldn’t be read as books.`);
   if (!valid.length) return;
 
   const confirmed = await sheet(
