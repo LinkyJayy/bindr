@@ -193,6 +193,7 @@ export class Highlights {
     if (key === this.key && !this.dirty) return;
     this.key = key;
     this.dirty = false;
+    if (this.eraser) this._syncBar();
     this.layer.innerHTML = parts.join('');
     this._drawSelection();
   }
@@ -217,6 +218,7 @@ export class Highlights {
   // ------------------------------------------------------------ selecting
   /** Long-press: select the word under the finger. Returns true if a selection started. */
   async beginSelect(clientX, clientY) {
+    if (this.eraser) return false;
     this.hidePopup();
     const hit = await this._hit(clientX, clientY);
     if (!hit) return false;
@@ -252,19 +254,93 @@ export class Highlights {
     this.selLayer.innerHTML = '';
   }
 
-  /** Tap: if it lands on a highlight, open its pop-up. Returns true if handled. */
-  tapAt(clientX, clientY) {
-    if (!this.popup.hidden) { this.hidePopup(); this.clearSelection(); return true; }
+  /** The highlight drawn under a screen point, if any. */
+  _highlightAt(clientX, clientY) {
     // The overlay doesn't take pointer events (so pages still turn), so hit-test its boxes directly.
     const el = [...this.layer.querySelectorAll('.hl')].find((x) => {
       const b = x.getBoundingClientRect();
       return clientX >= b.left - 2 && clientX <= b.right + 2 && clientY >= b.top - 2 && clientY <= b.bottom + 2;
     });
-    if (!el) return false;
-    const h = this.list.find((x) => x.id === el.dataset.h);
+    return el ? this.list.find((x) => x.id === el.dataset.h) || null : null;
+  }
+
+  /** Tap: if it lands on a highlight, open its pop-up (or erase it in eraser mode). Returns true if handled. */
+  tapAt(clientX, clientY) {
+    if (this.eraser) {
+      const h = this._highlightAt(clientX, clientY);
+      if (h) this.erase(h);
+      return true; // taps don't turn pages while erasing (swipes still do)
+    }
+    if (!this.popup.hidden) { this.hidePopup(); this.clearSelection(); return true; }
+    const h = this._highlightAt(clientX, clientY);
     if (!h) return false;
+    const el = this.layer.querySelector(`.hl[data-h="${h.id}"]`);
     this.showPopup({ highlight: h, anchor: el.getBoundingClientRect() });
     return true;
+  }
+
+  // ------------------------------------------------------------ eraser
+  /** Eraser mode: tap highlighted text to remove that highlight. */
+  setEraser(on) {
+    this.eraser = on;
+    this.hidePopup();
+    this.clearSelection();
+    this.reader.root.classList.toggle('erasing', on);
+    this.bar ||= this.reader.root.querySelector('.eraser-bar');
+    this.bar.hidden = !on;
+    this.lastErased = null;
+    this._syncBar();
+    this.dirty = true;
+    this.update();
+  }
+
+  _syncBar() {
+    if (!this.bar) return;
+    const n = this.reader.visiblePages().reduce((sum, p) => {
+      const d = this._pageData(p);
+      return sum + (d ? this._onPage(p, d).length : 0);
+    }, 0);
+    this.bar.querySelector('.eraser-msg').textContent = this.lastErased
+      ? 'Highlight removed.'
+      : n ? 'Tap a highlight to remove it.' : 'No highlights on this page.';
+    this.bar.querySelector('[data-eraser="undo"]').hidden = !this.lastErased;
+  }
+
+  async erase(h) {
+    // Remove it straight away; the server catches up (and Undo can bring it back).
+    this.list = this.list.filter((x) => x !== h);
+    this.lastErased = h;
+    this.dirty = true;
+    this.update();
+    this._syncBar();
+    navigator.vibrate?.(8);
+    try {
+      await api.deleteHighlight(h.id);
+    } catch (e) {
+      this.list.push(h);
+      this.lastErased = null;
+      this.dirty = true;
+      this.update();
+      this._syncBar();
+      toast(e.message);
+    }
+  }
+
+  async undoErase() {
+    const h = this.lastErased;
+    if (!h) return;
+    this.lastErased = null;
+    try {
+      const { highlight } = await api.addHighlight(this.book.id, {
+        page: h.page, start: h.start, end: h.end, text: h.text, color: h.color, note: h.note,
+      });
+      this.list.push(highlight);
+      this.dirty = true;
+      this.update();
+    } catch (e) {
+      toast(e.message);
+    }
+    this._syncBar();
   }
 
   /** Double-tap: the word under the point, or null. */

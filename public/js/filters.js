@@ -52,9 +52,20 @@ function daltonize(type) {
 // E-ink: grayscale on soft warm-gray "paper" with dark-gray "ink", like an e-reader panel.
 export const EINK_PAPER = [0.914, 0.906, 0.878];
 export const EINK_INK = [0.13, 0.13, 0.13];
+const COOL_PAPER = [0.9, 0.905, 0.91];
+const WARM_PAPER = [0.95, 0.885, 0.76];
+export const DEFAULT_EINK_WARMTH = 35;
+/** Paper and ink colors for an E-ink warmth of 0 (cool gray) … 100 (warm cream, like a frontlight set warm). */
+export function einkColors(warmth = DEFAULT_EINK_WARMTH) {
+  const w = Math.min(100, Math.max(0, warmth)) / 100;
+  const paper = COOL_PAPER.map((c, i) => c + (WARM_PAPER[i] - c) * w);
+  const ink = [0.13 + 0.03 * w, 0.13 + 0.005 * w, 0.13 - 0.02 * w];
+  return { paper, ink };
+}
 export const EINK_LEVELS = 16; // e-ink panels show a limited number of gray shades
-function einkTransform() {
-  return affine(EINK_PAPER.map((p, i) => LUM.map((l) => l * (p - EINK_INK[i]))), [...EINK_INK]);
+function einkTransform(warmth) {
+  const { paper, ink } = einkColors(warmth);
+  return affine(paper.map((p, i) => LUM.map((l) => l * (p - ink[i]))), [...ink]);
 }
 export const isEink = (setting) => setting?.preset === 'eink';
 
@@ -105,7 +116,7 @@ function customTransform(c) {
 export function transformFor(setting) {
   switch (setting?.preset) {
     case 'grayscale': return grayscale();
-    case 'eink': return einkTransform();
+    case 'eink': return einkTransform(setting.einkWarmth ?? DEFAULT_EINK_WARMTH);
     case 'vibrant': return then(saturate(1.7), contrast(1.08));
     case 'dull': return then(then(saturate(0.45), contrast(0.88)), brightness(0.02));
     case 'colorblind':
@@ -135,9 +146,11 @@ export function toSvgValues(t) {
 export function loadSetting() {
   try {
     const s = JSON.parse(localStorage.getItem('bindr:filter') || 'null');
-    if (s && typeof s === 'object') return { preset: 'none', colorblind: 'deuteranopia', ...s, custom: { ...DEFAULT_CUSTOM, ...s.custom } };
+    if (s && typeof s === 'object') {
+      return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, ...s, custom: { ...DEFAULT_CUSTOM, ...s.custom } };
+    }
   } catch {}
-  return { preset: 'none', colorblind: 'deuteranopia', custom: { ...DEFAULT_CUSTOM } };
+  return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, custom: { ...DEFAULT_CUSTOM } };
 }
 
 export function saveSetting(s) {
@@ -188,6 +201,13 @@ export class FilterPanel {
         <div class="fp-label">Type of color blindness</div>
         <div class="chips">${COLORBLIND.map((t) => `<button class="chip" data-cb="${t.id}" role="radio" title="${esc(t.hint)}">${esc(t.label)}<small>${esc(t.hint)}</small></button>`).join('')}</div>
       </div>
+      <div class="fp-sub" data-section="eink">
+        <label class="slider"><span>Warmth</span>
+          <input type="range" data-eink="warmth" min="0" max="100" step="1" aria-label="E-ink warmth">
+          <output data-out="eink-warmth"></output></label>
+        <div class="eink-scale"><span>Cool</span><span>Warm</span></div>
+        <label class="check"><input type="checkbox" data-eink="noflash"> <span>Disable flash <small>(the black-and-white refresh every 6 pages)</small></span></label>
+      </div>
       <div class="fp-sub" data-section="custom">
         ${SLIDERS.map((s) => `
           <label class="slider"><span>${s.label}</span>
@@ -203,6 +223,12 @@ export class FilterPanel {
     if (closeBtn) closeBtn.onclick = () => this.toggle(false);
     this.panel.querySelectorAll('[data-preset]').forEach((b) => (b.onclick = () => this._set({ preset: b.dataset.preset })));
     this.panel.querySelectorAll('[data-cb]').forEach((b) => (b.onclick = () => this._set({ preset: 'colorblind', colorblind: b.dataset.cb })));
+    this.panel.querySelector('[data-eink="warmth"]').addEventListener('input', (e) => {
+      this._set({ preset: 'eink', einkWarmth: Number(e.target.value) });
+    });
+    this.panel.querySelector('[data-eink="noflash"]').addEventListener('change', (e) => {
+      this._set({ preset: 'eink', einkFlash: !e.target.checked });
+    });
     this.panel.querySelectorAll('[data-key]').forEach((input) => {
       input.addEventListener('input', () => {
         const key = input.dataset.key;
@@ -240,6 +266,11 @@ export class FilterPanel {
     });
     this.panel.querySelector('[data-section="colorblind"]').hidden = s.preset !== 'colorblind';
     this.panel.querySelector('[data-section="custom"]').hidden = s.preset !== 'custom';
+    this.panel.querySelector('[data-section="eink"]').hidden = s.preset !== 'eink';
+    const warmth = s.einkWarmth ?? DEFAULT_EINK_WARMTH;
+    this.panel.querySelector('[data-eink="warmth"]').value = String(warmth);
+    this.panel.querySelector('[data-out="eink-warmth"]').textContent = `${warmth}%`;
+    this.panel.querySelector('[data-eink="noflash"]').checked = s.einkFlash === false;
     for (const sl of SLIDERS) {
       const input = this.panel.querySelector(`[data-key="${sl.key}"]`);
       if (Number(input.value) !== s.custom[sl.key]) input.value = s.custom[sl.key];
@@ -289,6 +320,7 @@ export function applyAppFilter(setting = loadSetting()) {
   } else {
     root.style.removeProperty('--filtered-bg');
   }
+  if (eink) root.style.setProperty('--eink-paper', `rgb(${einkColors(setting.einkWarmth).paper.map((v) => Math.round(v * 255)).join(',')})`);
   if (eink && !document.getElementById('eink-grain')) {
     document.body.insertAdjacentHTML('beforeend', '<div id="eink-grain" aria-hidden="true"></div>');
   }

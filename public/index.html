@@ -154,6 +154,9 @@
         <button class="icon-btn" data-action="listen" aria-label="Read aloud" title="Read aloud" aria-pressed="false" hidden>
           <svg viewBox="0 0 24 24" width="22" height="22"><rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>
         </button>
+        <button class="icon-btn" data-action="eraser" aria-label="Eraser: remove highlights" title="Eraser: remove highlights" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15.2 4.3 20 9.1a1.6 1.6 0 0 1 0 2.3l-7.9 7.9H8.4l-4.3-4.3a1.6 1.6 0 0 1 0-2.3l8.8-8.4a1.6 1.6 0 0 1 2.3 0zM8.6 10.2l5.6 5.6M8.4 19.3H20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" fill="none"/></svg>
+        </button>
         <button class="icon-btn aa-btn" data-action="display" aria-label="Display settings" title="Display settings" aria-pressed="false">
           <span aria-hidden="true"><small>A</small>A</span>
         </button>
@@ -162,6 +165,12 @@
         </button>
       </header>
 
+      <div class="eraser-bar" role="status" hidden>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M15.2 4.3 20 9.1a1.6 1.6 0 0 1 0 2.3l-7.9 7.9H8.4l-4.3-4.3a1.6 1.6 0 0 1 0-2.3l8.8-8.4a1.6 1.6 0 0 1 2.3 0zM8.6 10.2l5.6 5.6M8.4 19.3H20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" fill="none"/></svg>
+        <span class="eraser-msg"></span>
+        <button data-eraser="undo" hidden>Undo</button>
+        <button data-eraser="done" class="eraser-done">Done</button>
+      </div>
       <div class="display-panel" role="dialog" aria-label="Display settings" hidden>
         <div class="dp-tabs" role="tablist">
           <button class="dp-tab active" data-tab="themes" role="tab">Themes</button>

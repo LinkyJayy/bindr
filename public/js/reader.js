@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { openBook } from './docs.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
-import { FilterPanel, toGL, isIdentity, applyAppFilter, applyRGB, isEink, EINK_LEVELS } from './filters.js';
+import { FilterPanel, toGL, isIdentity, applyAppFilter, applyRGB, isEink, EINK_LEVELS, loadSetting } from './filters.js';
 import { DARK_BG } from './darkpage.js';
 import { Highlights, showDefinition } from './highlights.js';
 import { esc, sheet, menu, toast } from './ui.js';
@@ -256,6 +256,7 @@ export class Reader {
   /** E-ink screens briefly flash black and white to clear ghosting every few pages. */
   _einkRefresh() {
     if (!document.documentElement.classList.contains('eink')) return;
+    if (loadSetting().einkFlash === false) return; // "Disable flash" is on
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     this.einkTurns = (this.einkTurns || 0) + 1;
     if (this.einkTurns % 6) return;
@@ -824,6 +825,15 @@ export class Reader {
 
     this.root.querySelector('[data-action="close"]').onclick = () => this.onClose?.();
     this.root.querySelector('[data-action="menu"]').onclick = () => this._readerMenu();
+    const eraserBtn = this.root.querySelector('[data-action="eraser"]');
+    this.setEraser = (on) => {
+      if (!this.hl) return;
+      this.hl.setEraser(on);
+      eraserBtn.setAttribute('aria-pressed', String(on));
+    };
+    eraserBtn.onclick = () => this.setEraser(!this.hl?.eraser);
+    this.root.querySelector('[data-eraser="done"]').onclick = () => this.setEraser(false);
+    this.root.querySelector('[data-eraser="undo"]').onclick = () => this.hl?.undoErase();
     this.el.status.onclick = () => {
       this.statusMode = this.statusMode === 'chapter' ? 'book' : 'chapter';
       try { localStorage.setItem('bindr:status-mode', this.statusMode); } catch {}
@@ -846,7 +856,7 @@ export class Reader {
       else if (e.key === 'Home') this._goto(1);
       else if (e.key === 'End') this._goto(this.numPages);
       else if (e.key === 'z' || e.key === 'Z') this.toggleZoom();
-      else if (e.key === 'Escape') this.onClose?.();
+      else if (e.key === 'Escape') { if (this.hl?.eraser) this.setEraser(false); else this.onClose?.(); }
     };
     window.addEventListener('keydown', this._onKey);
 
@@ -999,6 +1009,8 @@ export class Reader {
   /** Single taps wait briefly so a second tap can make it a double-tap (zoom). */
   /** Double-tap a word to look it up; double-tap anywhere else to zoom. */
   _tapOrDoubleTap(p, clientX, clientY) {
+    // Eraser mode: every tap goes straight to the eraser (no double-tap wait, no page turns).
+    if (this.hl?.eraser) { this.hl.tapAt(clientX, clientY); return; }
     const now = performance.now();
     const last = this.lastTap;
     if (last && now - last.t < 320 && Math.hypot(p[0] - last.p[0], p[1] - last.p[1]) < 48 * this.dpr) {
