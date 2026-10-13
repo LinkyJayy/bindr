@@ -4,7 +4,7 @@ A cloud PDF library with a realistic, Apple Books–style **curl** page turn.
 Installable as a PWA and ready to deploy on Railway.
 
 - **E-reader style interface.** A clean black-and-white look inspired by e-ink readers. The Home page has a search bar, a ⋮ menu (Sync, Add Books, Ratings & Reviews, Settings, Help), quick settings under the clock (Dark Mode, Sync, Add Books, All Settings), a "Jump Back In" card and shelves of your books. The Library has All / Reading / Unread / Finished / Rated filters, sorting, and grid or list view, and the bottom bar holds Home, the book you last read, and Library.
-- **Accounts.** Email/password sign-up with secure, httpOnly session cookies and bcrypt-hashed passwords.
+- **Accounts.** Email/password sign-up with secure, httpOnly session cookies and bcrypt-hashed passwords. Email addresses are verified with a 6-digit code, and **Forgot password?** on the sign-in screen resets a password by emailing a code (see [Email](#email)).
 - **Cloud library.** Uploaded PDFs, covers and reading progress are stored on the server, so they follow you to every device.
 - **Upload.** Use the **+** button, or drag and drop PDF or **ePUB** files onto the window. Bindr reads each book's title, author and cover before uploading. ePUBs are laid out by Bindr's own text engine, so the page curl, highlights, read-aloud, dark pages and the dictionary all work with them.
 - **Custom names.** You choose each book's title and author before it uploads. Change them any time with **••• → Rename / Edit Details**.
@@ -21,7 +21,7 @@ Installable as a PWA and ready to deploy on Railway.
 - **Chapters & progress.** The bottom-right corner shows the current page and how many pages are left in the chapter. Tap it to switch to the whole book. Chapters come from the book's table of contents, and you can add your own under ⋮ → Chapters.
 - **Ratings & reviews.** Double-tap or press and hold a book (or use ••• → Rate & Review) to give it 1.0–5.0 stars in half-star steps, with a review title and text. The rating shows on the book in your library.
 - **Read aloud.** Tap the microphone in the reader to listen to the book, using the device's built-in voices. The sentence being read is captioned and highlighted on the page, and pages turn by themselves as reading continues. You can pause, skip back or forward a sentence, change the speed (0.75×–2×) and pick a voice. It needs a PDF with real text; scanned image-only PDFs have nothing to read.
-- **About page.** ⋮ → About shows a page written in Markdown (headings, bold, italic, lists, quotes, links, images, code). Everyone can read it; only the owner account (`ADMIN_EMAILS`) sees **Edit**, with a formatting toolbar and a live preview.
+- **About page.** ⋮ → About shows a page written in Markdown (headings, bold, italic, lists, quotes, links, images, code). Everyone can read it; only the owner account (`ADMIN_EMAILS`), once its email is verified, sees **Edit**, with a formatting toolbar and a live preview.
 - **PWA.** Installable and works offline: the app shell is cached, and every book you have opened stays readable offline. Progress made offline syncs when you reconnect.
 
 ## Run locally
@@ -50,3 +50,20 @@ Optional environment variables:
 | `DICTIONARY_URL`| `https://api.dictionaryapi.dev/api/v2/entries/en/` | Dictionary service (same JSON format) |
 | `ADMIN_EMAILS`  | `ljmiller2389@gmail.com`                     | Comma-separated accounts allowed to edit the About page |
 | `PORT`          | set by Railway                               | HTTP port                   |
+| `RESEND_API_KEY` / `BREVO_API_KEY` / `SMTP_URL` | none | Email service for verification and reset codes (see below) |
+| `EMAIL_FROM`    | `Bindr <onboarding@resend.dev>`              | Sender of Bindr's emails    |
+| `REQUIRE_EMAIL_VERIFICATION` | `true` when an email service is set | Set to `false` to make verification optional |
+
+## Email
+
+Bindr emails 6-digit codes to verify addresses and to reset passwords. Set up one of these:
+
+- **Resend** (`RESEND_API_KEY`): works on every Railway plan. Until you verify a domain in Resend, it can only send to the email you signed up to Resend with.
+- **Brevo** (`BREVO_API_KEY`): can send from a single verified address, such as a Gmail address, without owning a domain. Set `EMAIL_FROM` to that address.
+- **SMTP** (`SMTP_URL`, e.g. `smtps://user:app-password@smtp.gmail.com:465`): Railway only allows outgoing SMTP on its Pro plan.
+
+With an email service set up, everyone must verify their email before using Bindr. Existing accounts are asked to verify the next time they open the app.
+
+Without one, verification is optional and codes are written to the server log (Railway → Deployments → Logs) instead of being emailed. That's enough for the owner to verify their own account.
+
+Editing the About page always needs a verified email, so signing up with the owner's address isn't enough to edit it. If someone else registered with your address, use **Forgot password?**: proving you receive the email resets the password, verifies the account and signs everyone else out of it.

@@ -1,4 +1,4 @@
-import { api } from './api.js';
+import { api, onNeedsVerification } from './api.js';
 import { inspectPdf } from './pdf.js';
 import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting, saveSetting, isEink } from './filters.js';
 import { Reader } from './reader.js';
@@ -40,6 +40,25 @@ async function boot() {
     if (cached) state.user = JSON.parse(cached);
   }
   if (!state.user) return showAuth();
+  if (state.user.mustVerify) return showVerify();
+  await loadBooks();
+  route();
+}
+
+// The server asks for a verified email (e.g. verification was switched on after sign-in).
+onNeedsVerification(() => {
+  if (!state.user || document.querySelector('.verify-card')) return;
+  state.user.mustVerify = true;
+  showVerify();
+});
+
+/** Saves the signed-in account and opens the app (or the verify screen first). */
+async function signedIn(user, { delivery = null } = {}) {
+  state.user = user;
+  localStorage.setItem('bindr:user', JSON.stringify(user));
+  if (user.mustVerify) return showVerify({ delivery });
+  // The owner's account gets a code even when verification is optional.
+  if (delivery && !user.verified) return showVerify({ delivery, optional: true });
   await loadBooks();
   route();
 }
@@ -82,31 +101,183 @@ function showAuth() {
     mode = m;
     view.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
     view.querySelector('.only-register').hidden = m !== 'register';
+    view.querySelector('.only-login').hidden = m !== 'login';
     submit.textContent = m === 'login' ? 'Sign in' : 'Create account';
     form.password.autocomplete = m === 'login' ? 'current-password' : 'new-password';
     err.textContent = '';
   };
   view.querySelectorAll('.seg-btn').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
+  view.querySelector('[data-action="forgot"]').onclick = () => showReset(form.email.value.trim());
   form.onsubmit = async (e) => {
     e.preventDefault();
     err.textContent = '';
     submit.disabled = true;
     try {
       const { email, password, name } = form;
-      const { user } = mode === 'login'
+      const { user, delivery } = mode === 'login'
         ? await api.login(email.value.trim(), password.value)
         : await api.register(name.value.trim(), email.value.trim(), password.value);
-      state.user = user;
-      localStorage.setItem('bindr:user', JSON.stringify(user));
-      await loadBooks();
-      history.replaceState(null, '', '/');
-      route();
+      await signedIn(user, { delivery });
     } catch (ex) {
       err.textContent = ex.message;
     } finally {
       submit.disabled = false;
     }
   };
+}
+
+/** A centered card like the sign-in screen. */
+function authCard(html) {
+  closeReader();
+  const main = document.createElement('main');
+  main.className = 'auth';
+  main.innerHTML = `<div class="auth-card">
+    <img class="auth-logo" src="/icons/icon-192.png" alt="" width="72" height="72">${html}</div>`;
+  app.replaceChildren(main);
+  document.title = 'Bindr';
+  return main;
+}
+
+const LOGGED_NOTE = 'This server has no email service set up, so the code was written to the server log instead of being emailed.';
+
+/** Asks for a 6-digit code to sign up or to verify an existing account. */
+function showVerify({ delivery = null, optional = false } = {}) {
+  const view = authCard(`<h1>Verify your email</h1>
+    <p class="auth-text">Enter the 6-digit code we sent to <strong>${esc(state.user.email)}</strong>.</p>
+    <p class="auth-note" hidden></p>
+    <form class="auth-form verify-card" novalidate>
+      <label class="field"><span>Code</span>
+        <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required placeholder="000000"></label>
+      <p class="form-error" role="alert"></p>
+      <button class="btn primary block" type="submit">Verify</button>
+      <button class="auth-link" type="button" data-action="resend">Send a new code</button>
+      <button class="auth-link" type="button" data-action="leave">${optional ? 'Not now' : 'Sign out'}</button>
+    </form>`);
+  const form = view.querySelector('form');
+  const err = view.querySelector('.form-error');
+  const note = view.querySelector('.auth-note');
+  const resend = view.querySelector('[data-action="resend"]');
+  const showDelivery = (d) => { note.hidden = d !== 'logged'; note.textContent = LOGGED_NOTE; };
+  let wait = null;
+  const cooldown = (secs) => {
+    clearInterval(wait);
+    let left = secs;
+    const tick = () => {
+      resend.disabled = left > 0;
+      resend.textContent = left > 0 ? `Send a new code (${left}s)` : 'Send a new code';
+      if (left-- <= 0) clearInterval(wait);
+    };
+    tick();
+    wait = setInterval(tick, 1000);
+  };
+  const send = async ({ quiet = false } = {}) => {
+    err.textContent = '';
+    try {
+      showDelivery((await api.sendVerification()).delivery);
+      if (!quiet) toast('A new code is on its way.');
+      cooldown(60);
+    } catch (ex) {
+      const secs = ex.status === 429 && +(ex.message.match(/(\d+) seconds/) || [])[1];
+      if (secs) cooldown(secs);
+      if (!(quiet && ex.status === 429)) err.textContent = ex.message;
+    }
+  };
+  resend.onclick = () => send();
+  view.querySelector('[data-action="leave"]').onclick = async () => {
+    clearInterval(wait);
+    if (!optional) return signOut();
+    await loadBooks();
+    route();
+  };
+  form.code.oninput = () => {
+    form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6);
+    if (form.code.value.length === 6) form.requestSubmit();
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const submit = form.querySelector('[type="submit"]');
+    if (submit.disabled) return;
+    err.textContent = '';
+    submit.disabled = true;
+    try {
+      const { user } = await api.verifyEmail(form.code.value);
+      clearInterval(wait);
+      toast('Email verified.');
+      await signedIn(user);
+    } catch (ex) {
+      err.textContent = ex.message;
+      form.code.select();
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  // A code was just sent by signing up; otherwise send one now.
+  if (delivery) { showDelivery(delivery); cooldown(60); } else send({ quiet: true });
+  form.code.focus();
+}
+
+/** Forgot password: email → code → new password. */
+function showReset(prefill = '') {
+  const view = authCard(`<h1>Reset password</h1>
+    <p class="auth-text">We'll email you a code to choose a new password.</p>
+    <p class="auth-note" hidden></p>
+    <form class="auth-form" novalidate>
+      <label class="field"><span>Email</span>
+        <input name="email" type="email" autocomplete="email" required placeholder="you@example.com" value="${esc(prefill)}"></label>
+      <div class="reset-step2" hidden>
+        <label class="field"><span>Code</span>
+          <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></label>
+        <label class="field"><span>New password</span>
+          <input name="password" type="password" autocomplete="new-password" minlength="8" placeholder="At least 8 characters"></label>
+      </div>
+      <p class="form-error" role="alert"></p>
+      <button class="btn primary block" type="submit">Email me a code</button>
+      <button class="auth-link" type="button" data-action="resend" hidden>Send a new code</button>
+      <button class="auth-link" type="button" data-action="back">Back to sign in</button>
+    </form>`);
+  const form = view.querySelector('form');
+  const err = view.querySelector('.form-error');
+  const submit = form.querySelector('[type="submit"]');
+  const text = view.querySelector('.auth-text');
+  const note = view.querySelector('.auth-note');
+  const resend = view.querySelector('[data-action="resend"]');
+  let step = 1;
+  const send = async () => {
+    const { delivery } = await api.sendReset(form.email.value.trim());
+    note.hidden = delivery !== 'logged';
+    note.textContent = LOGGED_NOTE;
+    step = 2;
+    form.email.readOnly = true;
+    view.querySelector('.reset-step2').hidden = false;
+    resend.hidden = false;
+    text.innerHTML = `If there's an account for <strong>${esc(form.email.value.trim())}</strong>, we've emailed it a 6-digit code. Enter it with your new password.`;
+    submit.textContent = 'Set new password';
+    form.code.focus();
+  };
+  resend.onclick = async () => {
+    err.textContent = '';
+    try { await send(); toast('A new code is on its way.'); } catch (ex) { err.textContent = ex.message; }
+  };
+  view.querySelector('[data-action="back"]').onclick = () => showAuth();
+  form.code.oninput = () => { form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    submit.disabled = true;
+    try {
+      if (step === 1) await send();
+      else {
+        const { user } = await api.resetPassword(form.email.value.trim(), form.code.value, form.password.value);
+        toast('Password changed. Other devices were signed out.');
+        await signedIn(user);
+      }
+    } catch (ex) {
+      err.textContent = ex.message;
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  form.email.focus();
 }
 
 async function signOut() {
@@ -394,7 +565,7 @@ async function loadAbout() {
     localStorage.setItem('bindr:about', JSON.stringify({ content: about.content, updatedAt: about.updatedAt }));
   } catch (e) {
     const cached = JSON.parse(localStorage.getItem('bindr:about') || 'null');
-    if (cached) Object.assign(about, cached, { loaded: true, canEdit: false });
+    if (cached) Object.assign(about, cached, { loaded: true, canEdit: false, verifyToEdit: false });
     about.error = e.offline ? 'You’re offline. Showing the last version you saw.' : e.message;
   } finally {
     about.loading = false;
@@ -446,6 +617,7 @@ function aboutHtml() {
   return `<div class="about-head">
       <h1 class="k-page-title">About</h1>
       ${about.canEdit ? '<button class="btn" data-about="edit">Edit</button>' : ''}
+      ${about.verifyToEdit ? '<button class="btn" data-about="verify">Verify Email to Edit</button>' : ''}
     </div>
     ${about.error ? `<p class="book-sub" style="margin:0 0 10px">${esc(about.error)}</p>` : ''}
     <article class="md-body about-body">${renderMarkdown(about.content || ABOUT_PLACEHOLDER)}</article>
@@ -453,6 +625,10 @@ function aboutHtml() {
 }
 
 function bindAbout(main) {
+  main.querySelector('[data-about="verify"]')?.addEventListener('click', () => {
+    about.loaded = false;
+    showVerify({ optional: true });
+  });
   main.querySelector('[data-about="edit"]')?.addEventListener('click', () => {
     Object.assign(about, { editing: true, draft: about.content, tab: 'write' });
     renderShelf();
@@ -729,7 +905,8 @@ function settingsHtml() {
     <div class="k-group-title">Your Account</div>
     <div class="k-rows">
       ${row('name', 'Name', u.name)}
-      ${info('Email', u.email)}
+      ${u.verified ? info('Email', u.email) : row('verify', 'Email', `${u.email} · Not verified`)}
+      ${u.verified ? info('Email Status', 'Verified ✓') : ''}
       ${row('password', 'Change Password')}
       ${row('logout', 'Sign Out')}
     </div>
@@ -758,6 +935,7 @@ function bindSettings(main) {
     const a = b.dataset.set;
     if (a === 'name') changeName();
     if (a === 'password') changePassword();
+    if (a === 'verify') showVerify({ optional: true });
     if (a === 'logout') signOut();
     if (a === 'delete') deleteAccount();
     if (a === 'sync') syncLibrary();

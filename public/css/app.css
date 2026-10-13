@@ -104,6 +104,16 @@ button { cursor: pointer; }
 .auth-logo { border-radius: 16px; }
 .auth h1 { margin: 12px 0 2px; font-size: 32px; letter-spacing: -.01em; }
 .auth-sub { margin: 0 0 26px; color: var(--muted); }
+.auth-link {
+  display: block; margin: 14px auto 0; border: 0; background: none; padding: 8px;
+  font: inherit; font-size: 15px; color: var(--text); text-decoration: underline; text-underline-offset: 3px;
+}
+.auth-link:disabled { color: var(--muted); text-decoration: none; }
+.auth-text { margin: 0 0 18px; color: var(--muted); line-height: 1.45; }
+.auth-text strong { color: var(--text); overflow-wrap: anywhere; }
+.auth-note { margin: 0 0 14px; padding: 10px 12px; border: 1.5px dashed var(--strong-line); border-radius: 8px; font-size: 14px; text-align: left; }
+.code-input { font-size: 28px !important; letter-spacing: .4em; text-align: center; font-family: ui-monospace, Menlo, monospace; }
+.k-val .ok { font-weight: 700; }
 
 /* ---------- shell: top bar ---------- */
 .shell { min-height: 100dvh; padding-bottom: calc(var(--nav-h) + var(--safe-bottom)); }
