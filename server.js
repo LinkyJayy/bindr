@@ -242,7 +242,19 @@ setInterval(() => {
 }, 15 * 60e3).unref();
 
 // --- auth routes -----------------------------------------------------------
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+const STORAGE_FULL = 'The server has run out of storage space. Ask the person who runs Bindr to make its Railway volume bigger.';
+
+// Health check, plus how full the data volume is (handy when uploads start failing).
+app.get('/api/health', (req, res) => {
+  let storage;
+  try {
+    const st = fs.statfsSync(DATA_DIR);
+    const total = st.blocks * st.bsize;
+    const free = st.bavail * st.bsize;
+    storage = { totalMB: Math.round(total / 1048576), freeMB: Math.round(free / 1048576), usedPercent: total ? Math.round((1 - free / total) * 100) : null };
+  } catch {}
+  res.json({ ok: true, storage });
+});
 
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   const email = cleanText(req.body?.email, 200).toLowerCase();
@@ -355,7 +367,10 @@ app.post('/api/books', auth, (req, res) => {
     const cleanup = () => { for (const f of [pdf, cover]) if (f) fs.rm(f.path, { force: true }, () => {}); };
     if (err) {
       cleanup();
-      const msg = err.code === 'LIMIT_FILE_SIZE' ? `File is larger than ${MAX_UPLOAD_MB} MB.` : 'Upload failed.';
+      console.error(`Upload failed for user ${req.user.id}:`, err.code || '', err.message);
+      const msg = err.code === 'LIMIT_FILE_SIZE' ? `File is larger than ${MAX_UPLOAD_MB} MB.`
+        : err.code === 'ENOSPC' ? STORAGE_FULL
+          : `Upload failed (${err.code || err.message}).`;
       return res.status(400).json({ error: msg });
     }
     if (!pdf) { cleanup(); return res.status(400).json({ error: 'No book file was provided.' }); }
@@ -393,7 +408,7 @@ app.post('/api/books', auth, (req, res) => {
       console.error(e);
       cleanup();
       removeBookFiles(id);
-      return res.status(500).json({ error: 'Could not save the book.' });
+      return res.status(e.code === 'ENOSPC' ? 507 : 500).json({ error: e.code === 'ENOSPC' ? STORAGE_FULL : `Could not save the book (${e.code || e.message}).` });
     }
     res.status(201).json({ book: publicBook(q.getBook.get(id, req.user.id)) });
   });
