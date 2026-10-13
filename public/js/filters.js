@@ -139,12 +139,14 @@ const SLIDERS = [
 
 /** The floating Color Filter panel in the reader. */
 export class FilterPanel {
-  constructor(panel, button, onChange) {
+  /** embedded: rendered inside another panel (no own header/close button). */
+  constructor(panel, button, onChange, { embedded = false } = {}) {
+    this.embedded = embedded;
     this.panel = panel;
     this.button = button;
     this.onChange = onChange;
     this.setting = loadSetting();
-    button.onclick = () => this.toggle();
+    if (!embedded) button.onclick = () => this.toggle();
     this._build();
     this._sync();
   }
@@ -158,11 +160,11 @@ export class FilterPanel {
 
   _build() {
     const c = this.setting.custom;
-    this.panel.innerHTML = `
+    this.panel.innerHTML = `${this.embedded ? '' : `
       <div class="fp-head"><b>Color Filter</b>
         <button class="icon-btn" data-close aria-label="Close color filter">
           <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
-        </button></div>
+        </button></div>`}
       <div class="chips" role="radiogroup" aria-label="Filter">
         ${PRESETS.map((p) => `<button class="chip" data-preset="${p.id}" role="radio"><span class="swatch sw-${p.id}"></span>${esc(p.label)}</button>`).join('')}
       </div>
@@ -181,7 +183,8 @@ export class FilterPanel {
           <button class="btn ghost" data-reset>Reset</button>
         </div>
       </div>`;
-    this.panel.querySelector('[data-close]').onclick = () => this.toggle(false);
+    const closeBtn = this.panel.querySelector('[data-close]');
+    if (closeBtn) closeBtn.onclick = () => this.toggle(false);
     this.panel.querySelectorAll('[data-preset]').forEach((b) => (b.onclick = () => this._set({ preset: b.dataset.preset })));
     this.panel.querySelectorAll('[data-cb]').forEach((b) => (b.onclick = () => this._set({ preset: 'colorblind', colorblind: b.dataset.cb })));
     this.panel.querySelectorAll('[data-key]').forEach((input) => {

@@ -72,6 +72,7 @@ db.exec(`
   add('review_title', "TEXT NOT NULL DEFAULT ''");
   add('review_body', "TEXT NOT NULL DEFAULT ''");
   add('reviewed_at', 'INTEGER');
+  add('page_theme', "TEXT NOT NULL DEFAULT 'light'"); // per-book page theme: 'light' | 'dark'
 }
 
 // Clean up after the Book Store, which has been removed. Books people added from it
@@ -125,6 +126,7 @@ function publicBook(b) {
     rating: b.rating ?? null,
     reviewTitle: b.review_title || '',
     reviewBody: b.review_body || '',
+    pageTheme: b.page_theme === 'dark' ? 'dark' : 'light',
   };
 }
 
@@ -363,6 +365,11 @@ app.patch('/api/books/:id', auth, (req, res) => {
     vals.current_page = Math.max(1, parseInt(req.body.currentPage, 10) || 1);
   }
   if (req.body.pageCount !== undefined) { sets.push('page_count = @page_count'); vals.page_count = Math.max(0, parseInt(req.body.pageCount, 10) || 0); }
+  if (req.body.pageTheme !== undefined) {
+    if (!['light', 'dark'].includes(req.body.pageTheme)) return res.status(400).json({ error: 'Unknown page theme.' });
+    sets.push('page_theme = @page_theme');
+    vals.page_theme = req.body.pageTheme;
+  }
   if (req.body.reset) sets.push('current_page = 1', 'last_opened_at = NULL');
   if (sets.length) {
     vals.now = Date.now();

@@ -13,6 +13,9 @@ const state = {
   query: '',
   sort: localStorage.getItem('bindr:sort') || 'recent',
   uploads: [], // in-flight uploads: {key, title, author, coverUrl, progress}
+  view: null, // 'home' | 'library' | 'settings' | 'reviews'
+  libFilter: localStorage.getItem('bindr:lib-filter') || 'all',
+  libLayout: localStorage.getItem('bindr:lib-layout') || 'grid',
   reader: null,
 };
 
@@ -47,7 +50,9 @@ function route() {
     if (book) return showReader(book);
     history.replaceState(null, '', '/');
   }
-  showLibrary();
+  const views = { '/': 'home', '/library': 'library', '/settings': 'settings', '/reviews': 'reviews' };
+  if (!views[location.pathname]) history.replaceState(null, '', '/');
+  showShell(views[location.pathname] || 'home');
 }
 
 let pushedReader = false;
@@ -135,134 +140,451 @@ function replaceBook(book) {
   saveBooksLocal();
 }
 
-// ------------------------------------------------------------------ library
-let libView = null;
+// ------------------------------------------------------------------ app theme (UI dark mode)
+function uiTheme() {
+  return document.documentElement.dataset.ui || 'auto';
+}
 
-function showLibrary() {
+function uiIsDark() {
+  const t = uiTheme();
+  return t === 'auto' ? matchMedia('(prefers-color-scheme: dark)').matches : t === 'dark';
+}
+
+function setUiTheme(t) {
+  if (t === 'auto') delete document.documentElement.dataset.ui;
+  else document.documentElement.dataset.ui = t;
+  try {
+    if (t === 'auto') localStorage.removeItem('bindr:ui-theme');
+    else localStorage.setItem('bindr:ui-theme', t);
+  } catch {}
+  syncQuick();
+}
+
+const THEME_LABEL = { auto: 'Automatic', light: 'Off', dark: 'On' };
+const LAYOUT_LABEL = { auto: 'Automatic', single: 'One page', double: 'Two pages' };
+
+// ------------------------------------------------------------------ shell (top bar + bottom nav)
+let shell = null;
+
+const ICONS = {
+  more: '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="5.5" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="18.5" r="1.8" fill="currentColor"/></svg>',
+  chev: '<svg viewBox="0 0 24 24" width="18" height="18"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>',
+  back: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="m15 5-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>',
+  grid: '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>',
+  list: '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>',
+  book: '<svg class="empty-icon" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5zM12 6.5v13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/></svg>',
+};
+
+const VIEW_TITLES = { home: 'Home', library: 'Library', settings: 'Settings', reviews: 'Ratings & Reviews' };
+
+function showShell(view) {
   closeReader();
   if (!state.user) return showAuth();
-  document.title = 'Library · Bindr';
-  libView = tpl('tpl-library');
-  app.replaceChildren(libView);
+  const changed = state.view !== view || !shell || !app.contains(shell);
+  state.view = view;
+  if (!shell || !app.contains(shell)) {
+    shell = tpl('tpl-shell');
+    app.replaceChildren(shell);
+    bindShell();
+  }
+  shell.querySelectorAll('[data-nav]').forEach((b) => {
+    const on = b.dataset.nav === (view === 'home' ? '/' : `/${view}`);
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  document.title = `${VIEW_TITLES[view]} · Bindr`;
+  renderShelf();
+  if (changed) window.scrollTo(0, 0);
+}
 
-  const avatar = libView.querySelector('.avatar');
-  avatar.textContent = (state.user.name || state.user.email || '?').trim()[0].toUpperCase();
-  avatar.onclick = accountSheet;
-
-  const fileInput = libView.querySelector('.file-input');
-  libView.querySelectorAll('[data-action="upload"]').forEach((b) => (b.onclick = () => fileInput.click()));
+function bindShell() {
+  updateClock();
+  const fileInput = shell.querySelector('.file-input');
+  const pickFiles = () => fileInput.click();
   fileInput.onchange = () => {
     const files = [...fileInput.files];
     fileInput.value = '';
     if (files.length) startUpload(files);
   };
+  shell.querySelector('[data-action="upload"]').onclick = pickFiles;
+  shell.querySelector('[data-action="more"]').onclick = moreMenu;
 
-  const search = libView.querySelector('.search input');
+  const search = shell.querySelector('.k-search input');
   search.value = state.query;
-  search.oninput = () => { state.query = search.value; renderShelf(); };
-  const sort = libView.querySelector('.sort');
-  sort.value = state.sort;
-  sort.onchange = () => { state.sort = sort.value; localStorage.setItem('bindr:sort', sort.value); renderShelf(); };
+  search.oninput = () => {
+    state.query = search.value;
+    renderShelf();
+  };
 
-  // Drag & drop anywhere on the library.
-  const overlay = libView.querySelector('.drop-overlay');
+  // Quick settings, dropped down from the clock like on an e-reader.
+  const quickBtn = shell.querySelector('[data-action="quick"]');
+  const panel = shell.querySelector('.k-quick-panel');
+  const scrim = shell.querySelector('.k-quick-scrim');
+  const setQuick = (open) => {
+    panel.hidden = !open;
+    scrim.hidden = !open;
+    quickBtn.setAttribute('aria-expanded', String(open));
+    if (open) syncQuick();
+  };
+  quickBtn.onclick = () => setQuick(panel.hidden);
+  scrim.onclick = () => setQuick(false);
+  shell.querySelector('[data-action="quick-close"]').onclick = () => setQuick(false);
+  shell.querySelectorAll('[data-quick]').forEach((b) => (b.onclick = async () => {
+    const a = b.dataset.quick;
+    if (a === 'theme') { setUiTheme(uiIsDark() ? 'light' : 'dark'); return; }
+    setQuick(false);
+    if (a === 'sync') syncLibrary();
+    if (a === 'upload') pickFiles();
+    if (a === 'settings') navigate('/settings');
+  }));
+
+  shell.querySelectorAll('[data-nav]').forEach((b) => (b.onclick = () => {
+    if (state.query) { state.query = ''; search.value = ''; }
+    navigate(b.dataset.nav);
+  }));
+
+  // Drag & drop PDFs anywhere.
+  const overlay = shell.querySelector('.drop-overlay');
   let depth = 0;
-  libView.addEventListener('dragenter', (e) => { if (hasFiles(e)) { depth++; overlay.hidden = false; } });
-  libView.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; overlay.hidden = true; } });
-  libView.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
-  libView.addEventListener('drop', (e) => {
+  shell.addEventListener('dragenter', (e) => { if (hasFiles(e)) { depth++; overlay.hidden = false; } });
+  shell.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; overlay.hidden = true; } });
+  shell.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  shell.addEventListener('drop', (e) => {
     e.preventDefault();
     depth = 0;
     overlay.hidden = true;
     const files = [...(e.dataTransfer?.files || [])];
     if (files.length) startUpload(files);
   });
-
-  renderShelf();
 }
+
+function syncQuick() {
+  if (!shell) return;
+  const b = shell.querySelector('[data-quick="theme"]');
+  b.classList.toggle('on', uiIsDark());
+  b.querySelector('small').textContent = uiIsDark() ? 'On' : 'Off';
+}
+
+function updateClock() {
+  if (!shell || !app.contains(shell)) return;
+  const time = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  shell.querySelectorAll('.k-clock').forEach((el) => { el.textContent = time; });
+}
+setInterval(updateClock, 15000);
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', syncQuick);
 
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 
-function sortedBooks() {
-  const q = state.query.trim().toLowerCase();
-  let list = state.books.filter((b) => !q || b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q));
+async function syncLibrary() {
+  await syncPending();
+  await loadBooks();
+  renderShelf();
+  toast('Your library is up to date.');
+}
+
+async function moreMenu() {
+  const choice = await menu('', [
+    { label: 'Sync Your Library', value: 'sync' },
+    { label: 'Add Books', value: 'upload' },
+    { label: 'Ratings & Reviews', value: 'reviews' },
+    { label: 'Settings', value: 'settings' },
+    { label: 'Help', value: 'help' },
+  ]);
+  if (choice === 'sync') syncLibrary();
+  if (choice === 'upload') shell.querySelector('.file-input').click();
+  if (choice === 'reviews') navigate('/reviews');
+  if (choice === 'settings') navigate('/settings');
+  if (choice === 'help') helpSheet();
+}
+
+function helpSheet() {
+  return sheet(
+    `<h3>Using Bindr</h3>
+     <ul class="help-list">
+       <li><b>Add books:</b> tap <b>+</b> at the top, or drop PDFs onto the window.</li>
+       <li><b>Rate a book:</b> double-tap or press and hold its cover.</li>
+       <li><b>More options:</b> the <b>⋮</b> next to a book.</li>
+       <li><b>Turn pages:</b> swipe, tap the edges, or use the arrow keys.</li>
+       <li><b>Zoom:</b> double-tap a page.</li>
+       <li><b>Dark pages, layout and color:</b> the <b>Aa</b> button while reading. Dark pages are set per book.</li>
+       <li><b>Listen:</b> the microphone while reading.</li>
+     </ul>
+     <div class="actions"><button class="btn primary" data-ok>Done</button></div>`,
+    (el, close) => { el.querySelector('[data-ok]').onclick = () => close(); },
+  );
+}
+
+// ------------------------------------------------------------------ book cards
+function sortBooks(list, sort) {
   const by = {
     recent: (a, b) => (b.lastOpenedAt || b.createdAt) - (a.lastOpenedAt || a.createdAt),
     title: (a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }),
     author: (a, b) => (a.author || '￿').localeCompare(b.author || '￿') || a.title.localeCompare(b.title),
     added: (a, b) => b.createdAt - a.createdAt,
-  }[state.sort];
-  return list.sort(by);
-}
-
-function coverHtml(book) {
-  const img = book.hasCover ? `<img src="${api.coverUrl(book)}" alt="" loading="lazy" onerror="this.remove()">` : '';
-  return `<div class="cover"><div class="placeholder">${esc(book.title)}</div>${img}</div>`;
+  }[sort] || (() => 0);
+  return [...list].sort(by);
 }
 
 function progressPct(book) {
   if (!book.pageCount || !book.lastOpenedAt) return null;
-  return Math.round((book.currentPage / book.pageCount) * 100);
+  return Math.min(100, Math.round((book.currentPage / book.pageCount) * 100));
 }
 
-function renderShelf() {
-  if (!libView) return;
-  const grid = libView.querySelector('.grid');
-  const books = sortedBooks();
-  const searching = !!state.query.trim();
+const isFinished = (b) => (progressPct(b) ?? 0) >= 100;
 
-  // Continue reading
-  const recent = state.books.filter((b) => b.lastOpenedAt).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
-  const cont = libView.querySelector('.continue');
-  cont.hidden = !recent || searching;
-  if (recent && !searching) {
-    const pct = progressPct(recent) ?? 0;
-    const card = cont.querySelector('.continue-card');
-    card.innerHTML = `${coverHtml(recent)}<div class="meta">
-      <div class="t">${esc(recent.title)}</div>
-      ${recent.author ? `<div class="a">${esc(recent.author)}</div>` : ''}
-      <div class="a">Page ${recent.currentPage} of ${recent.pageCount || '?'} · ${pct}%</div>
-      <div class="progress"><div style="width:${pct}%"></div></div>
-      <button class="btn primary">Continue</button></div>`;
-    card.onclick = () => navigate(`/read/${recent.id}`);
-  }
+function coverHtml(book, { badges = false } = {}) {
+  const img = book.hasCover ? `<img src="${api.coverUrl(book)}" alt="" loading="lazy" onerror="this.remove()">` : '';
+  const pct = progressPct(book);
+  const extra = !badges ? '' : pct === null
+    ? '<span class="badge-new">NEW</span>'
+    : pct < 100 ? `<span class="cover-progress"><div style="width:${pct}%"></div></span>` : '';
+  return `<div class="cover"><div class="placeholder">${esc(book.title)}</div>${img}${extra}</div>`;
+}
 
-  const uploads = state.uploads.map((u) => `
-    <div class="book uploading">
-      <div class="cover"><div class="placeholder">${esc(u.title)}</div>${u.coverUrl ? `<img src="${u.coverUrl}" alt="">` : ''}
-        <div class="progress upload-bar"><div style="width:${Math.round(u.progress * 100)}%"></div></div></div>
-      <div class="book-info"><div class="book-text"><div class="book-title">${esc(u.title)}</div>
-      <div class="book-sub">Uploading… ${Math.round(u.progress * 100)}%</div></div></div>
-    </div>`).join('');
+function statusText(b) {
+  const pct = progressPct(b);
+  return pct === null ? 'New' : pct >= 100 ? 'Finished' : `${pct}% read`;
+}
 
-  grid.innerHTML = uploads + books.map((b) => {
-    const pct = progressPct(b);
-    const sub = pct === null ? '<span class="new">NEW</span>' : pct >= 100 ? 'Finished' : `${pct}%`;
-    return `<div class="book" data-id="${esc(b.id)}">
-      <button class="book-open" aria-label="Open ${esc(b.title)}">${coverHtml(b)}</button>
-      <div class="book-info">
-        <div class="book-text">
-          <div class="book-title" title="${esc(b.title)}">${esc(b.title)}</div>
-          <div class="book-sub">${sub}${b.author ? ` · ${esc(b.author)}` : ''}</div>
-          ${b.rating ? `<div class="book-meta">${starsHtml(b.rating, 11)}<span>${fmtRating(b.rating)}</span></div>` : ''}
-        </div>
-        <button class="more" aria-label="More options for ${esc(b.title)}">
-          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>
-        </button>
+function bookCard(b, { list = false } = {}) {
+  const rating = b.rating ? `<div class="book-meta">${starsHtml(b.rating, 11)}<span>${fmtRating(b.rating)}</span></div>` : '';
+  return `<div class="book" data-id="${esc(b.id)}">
+    <button class="book-open" aria-label="Open ${esc(b.title)}">${coverHtml(b, { badges: !list })}</button>
+    <div class="book-info">
+      <div class="book-text">
+        <div class="book-title" title="${esc(b.title)}">${esc(b.title)}</div>
+        <div class="book-sub">${list ? '' : `${statusText(b)}${b.author ? ' · ' : ''}`}${esc(b.author)}</div>
+        ${rating}
       </div>
-    </div>`;
-  }).join('');
+      ${list ? `<span class="k-pct">${statusText(b)}</span>` : ''}
+      <button class="more" aria-label="More options for ${esc(b.title)}">${ICONS.more}</button>
+    </div>
+  </div>`;
+}
 
-  grid.querySelectorAll('.book[data-id]').forEach((el) => {
+function uploadCard(u) {
+  return `<div class="book uploading">
+    <div class="cover"><div class="placeholder">${esc(u.title)}</div>${u.coverUrl ? `<img src="${u.coverUrl}" alt="">` : ''}
+      <div class="progress upload-bar"><div style="width:${Math.round(u.progress * 100)}%"></div></div></div>
+    <div class="book-info"><div class="book-text"><div class="book-title">${esc(u.title)}</div>
+    <div class="book-sub">Uploading… ${Math.round(u.progress * 100)}%</div></div></div>
+  </div>`;
+}
+
+function bindCards(root) {
+  root.querySelectorAll('.book[data-id]').forEach((el) => {
     const book = state.books.find((b) => b.id === el.dataset.id);
+    if (!book) return;
     bindBookGestures(el, book);
     el.querySelector('.more').onclick = () => bookMenu(book);
   });
+  root.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => navigate(`/read/${b.dataset.open}`)));
+  root.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => navigate(b.dataset.go)));
+  root.querySelectorAll('[data-action="upload"]').forEach((b) => (b.onclick = () => shell.querySelector('.file-input').click()));
+}
 
-  const empty = libView.querySelector('.empty');
-  empty.hidden = state.books.length > 0 || state.uploads.length > 0;
-  libView.querySelector('.shelf-title').hidden = !empty.hidden;
-  libView.querySelector('.shelf-title').textContent = searching ? `Results (${books.length})` : 'All Books';
+const emptyLibraryHtml = () => `
+  <div class="empty">${ICONS.book}
+    <h2>Your library is empty</h2>
+    <p>Add a PDF and it will be saved to your account, ready on every device.</p>
+    <button class="btn primary" data-action="upload">Add a Book</button>
+  </div>`;
+
+// ------------------------------------------------------------------ views
+function renderShelf() {
+  if (!shell || !app.contains(shell)) return;
+  const main = shell.querySelector('.k-main');
+  if (state.query.trim()) main.innerHTML = searchHtml();
+  else if (state.view === 'library') main.innerHTML = libraryHtml();
+  else if (state.view === 'settings') main.innerHTML = settingsHtml();
+  else if (state.view === 'reviews') main.innerHTML = reviewsHtml();
+  else main.innerHTML = homeHtml();
+  bindCards(main);
+  if (state.view === 'library' && !state.query.trim()) bindLibraryBar(main);
+  if (state.view === 'settings' && !state.query.trim()) bindSettings(main);
+}
+
+function shelfRow(title, books, { link } = {}) {
+  if (!books.length) return '';
+  return `<section class="k-section">
+    <div class="k-section-head"><h2>${esc(title)}</h2>${link ? `<button class="k-link" data-go="${link}">See all ${ICONS.chev}</button>` : ''}</div>
+    <div class="k-row">${books.map((b) => bookCard(b)).join('')}</div>
+  </section>`;
+}
+
+function homeHtml() {
+  if (!state.books.length && !state.uploads.length) return emptyLibraryHtml();
+  const recent = state.books.filter((b) => b.lastOpenedAt && !isFinished(b)).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+  const unread = sortBooks(state.books.filter((b) => !b.lastOpenedAt), 'added');
+  const current = recent[0] || unread[0];
+  let hero = '';
+  if (current) {
+    const pct = progressPct(current);
+    hero = `<section class="k-section"><div class="k-hero">
+      <button class="book-open" data-open="${esc(current.id)}" aria-label="Open ${esc(current.title)}" style="width:auto">${coverHtml(current)}</button>
+      <div class="k-hero-meta">
+        <div class="k-eyebrow">${pct === null ? 'Start reading' : 'Jump back in'}</div>
+        <div class="k-hero-title">${esc(current.title)}</div>
+        ${current.author ? `<div class="k-hero-author">${esc(current.author)}</div>` : ''}
+        <div class="k-hero-progress">${pct === null ? `${current.pageCount ? `${current.pageCount} pages · ` : ''}Not started`
+          : `Page ${current.currentPage} of ${current.pageCount || '?'} · ${pct}%<div class="progress"><div style="width:${pct}%"></div></div>`}</div>
+        <button class="btn primary" data-open="${esc(current.id)}">${pct === null ? 'Start Reading' : 'Continue Reading'}</button>
+      </div>
+    </div></section>`;
+  }
+  const uploads = state.uploads.map(uploadCard).join('');
+  const libraryRow = sortBooks(state.books, 'recent').filter((b) => b !== current).slice(0, 14);
+  const rated = state.books.filter((b) => b.rating).sort((a, b) => b.rating - a.rating).slice(0, 14);
+  const finished = state.books.filter(isFinished).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt).slice(0, 14);
+  return `${hero}
+    ${uploads ? `<section class="k-section"><div class="k-section-head"><h2>Uploading</h2></div><div class="k-row">${uploads}</div></section>` : ''}
+    ${shelfRow('Your Library', libraryRow, { link: '/library' })}
+    ${shelfRow('Recently Added', sortBooks(state.books, 'added').slice(0, 14), { link: '/library' })}
+    ${shelfRow('Rated by You', rated, { link: '/reviews' })}
+    ${shelfRow('Finished', finished)}`;
+}
+
+const FILTERS = [
+  { id: 'all', label: 'All', test: () => true },
+  { id: 'reading', label: 'Reading', test: (b) => b.lastOpenedAt && !isFinished(b) },
+  { id: 'unread', label: 'Unread', test: (b) => !b.lastOpenedAt },
+  { id: 'finished', label: 'Finished', test: isFinished },
+  { id: 'rated', label: 'Rated', test: (b) => !!b.rating },
+];
+
+function libraryHtml() {
+  const filter = FILTERS.find((f) => f.id === state.libFilter) || FILTERS[0];
+  const books = sortBooks(state.books.filter(filter.test), state.sort);
+  const list = state.libLayout === 'list';
+  const uploads = filter.id === 'all' && !list ? state.uploads.map(uploadCard).join('') : '';
+  const body = !state.books.length && !state.uploads.length ? emptyLibraryHtml()
+    : books.length || uploads
+      ? `<div class="${list ? 'k-list' : 'grid'}">${uploads}${books.map((b) => bookCard(b, { list })).join('')}</div>`
+      : `<div class="empty"><h2>No ${esc(filter.label.toLowerCase())} books</h2><p>Try another filter.</p></div>`;
+  return `<h1 class="k-page-title">Library</h1>
+    <div class="k-libbar">
+      <div class="k-filters" role="tablist">${FILTERS.map((f) => `<button class="k-chip ${f.id === filter.id ? 'active' : ''}" data-filter="${f.id}" role="tab">${f.label}</button>`).join('')}</div>
+      <select class="k-select" data-sort aria-label="Sort">
+        ${[['recent', 'Recent'], ['title', 'Title'], ['author', 'Author'], ['added', 'Date Added']].map(([v, l]) => `<option value="${v}" ${state.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <div class="k-viewtoggle" role="group" aria-label="View">
+        <button data-layout="grid" class="${list ? '' : 'active'}" aria-label="Grid view">${ICONS.grid}</button>
+        <button data-layout="list" class="${list ? 'active' : ''}" aria-label="List view">${ICONS.list}</button>
+      </div>
+    </div>
+    ${body}`;
+}
+
+function bindLibraryBar(main) {
+  main.querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => {
+    state.libFilter = b.dataset.filter;
+    localStorage.setItem('bindr:lib-filter', state.libFilter);
+    renderShelf();
+  }));
+  main.querySelector('[data-sort]').onchange = (e) => {
+    state.sort = e.target.value;
+    localStorage.setItem('bindr:sort', state.sort);
+    renderShelf();
+  };
+  main.querySelectorAll('[data-layout]').forEach((b) => (b.onclick = () => {
+    state.libLayout = b.dataset.layout;
+    localStorage.setItem('bindr:lib-layout', state.libLayout);
+    renderShelf();
+  }));
+}
+
+function searchHtml() {
+  const q = state.query.trim().toLowerCase();
+  const books = sortBooks(state.books.filter((b) => b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q)), 'title');
+  return `<h1 class="k-page-title">Results</h1>
+    <p class="book-sub" style="margin:0 0 12px">${books.length} in your library for “${esc(state.query.trim())}”</p>
+    ${books.length ? `<div class="k-list">${books.map((b) => bookCard(b, { list: true })).join('')}</div>`
+      : '<div class="empty"><h2>No matches</h2><p>Try a different title or author.</p></div>'}`;
+}
+
+function reviewsHtml() {
+  const rated = state.books.filter((b) => b.rating).sort((a, b) => b.rating - a.rating || a.title.localeCompare(b.title));
+  return `<h1 class="k-page-title">Ratings & Reviews</h1>
+    ${rated.length ? `<div class="k-list" style="border-top:0">${rated.map((b) => `
+      <div class="k-review-item book" data-id="${esc(b.id)}">
+        <button class="book-open" aria-label="Open ${esc(b.title)}" style="width:64px;flex:none">${coverHtml(b)}</button>
+        <div class="book-info" style="margin:0;align-items:flex-start;flex:1">
+          <div class="book-text">
+            <div class="book-title">${esc(b.title)}</div>
+            <div class="book-meta">${starsHtml(b.rating, 13)}<span>${fmtRating(b.rating)}</span></div>
+            ${b.reviewTitle ? `<div class="r-title">${esc(b.reviewTitle)}</div>` : ''}
+            ${b.reviewBody ? `<p>${esc(b.reviewBody).replace(/\n/g, '<br>')}</p>` : ''}
+          </div>
+          <button class="more" aria-label="More options for ${esc(b.title)}">${ICONS.more}</button>
+        </div>
+      </div>`).join('')}</div>`
+      : `<div class="empty">${ICONS.book}<h2>No ratings yet</h2><p>Double-tap or press and hold a book's cover to rate and review it.</p></div>`}`;
+}
+
+function settingsHtml() {
+  const u = state.user;
+  const mb = state.books.reduce((n, b) => n + (b.size || 0), 0) / 1048576;
+  let layout = 'auto';
+  try { layout = localStorage.getItem('bindr:layout') || 'auto'; } catch {}
+  const row = (action, label, value = '', cls = '') =>
+    `<button class="k-rowitem ${cls}" data-set="${action}"><span>${label}</span><span class="k-val">${esc(value)}${ICONS.chev}</span></button>`;
+  const info = (label, value) => `<div class="k-rowitem"><span>${label}</span><span class="k-val">${esc(value)}</span></div>`;
+  return `<h1 class="k-page-title">Settings</h1>
+    <div class="k-group-title">Your Account</div>
+    <div class="k-rows">
+      ${row('name', 'Name', u.name)}
+      ${info('Email', u.email)}
+      ${row('password', 'Change Password')}
+      ${row('logout', 'Sign Out')}
+    </div>
+    <div class="k-group-title">Display</div>
+    <div class="k-rows">
+      ${row('theme', 'Dark Mode', THEME_LABEL[uiTheme()])}
+      ${row('layout', 'Page Layout', LAYOUT_LABEL[layout] || 'Automatic')}
+    </div>
+    <div class="k-group-title">Device</div>
+    <div class="k-rows">
+      ${deferredInstall ? row('install', 'Install Bindr App') : ''}
+      ${row('sync', 'Sync Your Library')}
+      ${info('Storage', `${state.books.length} book${state.books.length === 1 ? '' : 's'} · ${mb.toFixed(1)} MB`)}
+    </div>
+    <div class="k-group-title">About</div>
+    <div class="k-rows">
+      ${row('help', 'Help')}
+      ${row('delete', 'Delete Account', '', 'danger')}
+    </div>`;
+}
+
+function bindSettings(main) {
+  main.querySelectorAll('[data-set]').forEach((b) => (b.onclick = async () => {
+    const a = b.dataset.set;
+    if (a === 'name') changeName();
+    if (a === 'password') changePassword();
+    if (a === 'logout') signOut();
+    if (a === 'delete') deleteAccount();
+    if (a === 'sync') syncLibrary();
+    if (a === 'help') helpSheet();
+    if (a === 'install' && deferredInstall) { deferredInstall.prompt(); deferredInstall = null; renderShelf(); }
+    if (a === 'theme') {
+      const t = await menu('Dark Mode', [
+        { label: 'Automatic (match this device)', value: 'auto' },
+        { label: 'On', value: 'dark' },
+        { label: 'Off', value: 'light' },
+      ]);
+      if (t) { setUiTheme(t); renderShelf(); }
+    }
+    if (a === 'layout') {
+      const l = await menu('Page Layout', [
+        { label: 'Automatic (two pages on wide screens)', value: 'auto' },
+        { label: 'One page', value: 'single' },
+        { label: 'Two pages when there is room', value: 'double' },
+      ]);
+      if (l) {
+        try { if (l === 'auto') localStorage.removeItem('bindr:layout'); else localStorage.setItem('bindr:layout', l); } catch {}
+        renderShelf();
+      }
+    }
+  }));
 }
 
 /**
@@ -314,19 +636,34 @@ function bindBookGestures(el, book) {
 async function rateBook(book) {
   const updated = await reviewSheet(book);
   if (updated) { replaceBook(updated); renderShelf(); }
+  return updated;
 }
 
 async function bookMenu(book) {
   const choice = await menu(book.title, [
     { label: 'Read', value: 'read' },
     { label: book.rating ? `Rate & Review (${fmtRating(book.rating)} ★)` : 'Rate & Review', value: 'rate' },
+    { label: book.pageTheme === 'dark' ? 'Page Theme: Dark (switch to Light)' : 'Page Theme: Light (switch to Dark)', value: 'theme' },
     { label: 'Rename / Edit Details', value: 'rename' },
-    { label: 'Mark as Unread', value: 'reset' },
+    isFinished(book) || !book.pageCount ? null : { label: 'Mark as Read', value: 'finish' },
+    book.lastOpenedAt ? { label: 'Mark as Unread', value: 'reset' } : null,
     { label: 'Remove from Library', value: 'delete', danger: true },
   ]);
   if (choice === 'read') navigate(`/read/${book.id}`);
   if (choice === 'rename') renameBook(book);
   if (choice === 'rate') rateBook(book);
+  if (choice === 'theme') {
+    try {
+      replaceBook((await api.updateBook(book.id, { pageTheme: book.pageTheme === 'dark' ? 'light' : 'dark' })).book);
+      renderShelf();
+    } catch (e) { toast(e.message); }
+  }
+  if (choice === 'finish') {
+    try {
+      replaceBook((await api.updateBook(book.id, { currentPage: book.pageCount, pageCount: book.pageCount })).book);
+      renderShelf();
+    } catch (e) { toast(e.message); }
+  }
   if (choice === 'reset') {
     try {
       replaceBook((await api.updateBook(book.id, { reset: true })).book);
@@ -437,7 +774,7 @@ async function startUpload(files) {
     try {
       const book = await api.uploadBook(it, (p) => {
         entry.progress = p;
-        const bar = libView?.querySelectorAll('.book.uploading')[state.uploads.indexOf(entry)];
+        const bar = shell?.querySelectorAll('.book.uploading')[state.uploads.indexOf(entry)];
         if (bar) {
           bar.querySelector('.upload-bar > div').style.width = `${Math.round(p * 100)}%`;
           bar.querySelector('.book-sub').textContent = `Uploading… ${Math.round(p * 100)}%`;
@@ -456,33 +793,6 @@ async function startUpload(files) {
 }
 
 // ------------------------------------------------------------------ account
-function accountSheet() {
-  const u = state.user;
-  return sheet(
-    `<h3>${esc(u.name)}</h3><p class="sub">${esc(u.email)} · ${state.books.length} book${state.books.length === 1 ? '' : 's'} in your library</p>
-     <div class="menu">
-       <button data-a="name">Change Name</button>
-       <button data-a="password">Change Password</button>
-       <button data-a="install" hidden>Install Bindr App</button>
-       <button data-a="logout">Sign Out</button>
-       <button data-a="delete" class="danger">Delete Account</button>
-       <button data-a="cancel">Close</button>
-     </div>`,
-    (el, close) => {
-      if (deferredInstall) el.querySelector('[data-a="install"]').hidden = false;
-      el.querySelectorAll('[data-a]').forEach((b) => (b.onclick = async () => {
-        close();
-        const a = b.dataset.a;
-        if (a === 'logout') signOut();
-        if (a === 'name') changeName();
-        if (a === 'password') changePassword();
-        if (a === 'delete') deleteAccount();
-        if (a === 'install' && deferredInstall) { deferredInstall.prompt(); deferredInstall = null; }
-      }));
-    },
-  );
-}
-
 function formSheet(title, fieldsHtml, submitLabel, onSubmit, danger = false) {
   return sheet(
     `<h3>${esc(title)}</h3><form>${fieldsHtml}<p class="form-error"></p>
@@ -504,7 +814,7 @@ function changeName() {
     'Save', async (f) => {
       state.user = (await api.updateMe({ name: f.name.value.trim() })).user;
       localStorage.setItem('bindr:user', JSON.stringify(state.user));
-      showLibrary();
+      renderShelf();
     });
 }
 
@@ -572,12 +882,19 @@ function showReader(book) {
   document.title = `${book.title} · Bindr`;
   const view = tpl('tpl-reader');
   app.replaceChildren(view);
-  libView = null;
 
   const pending = JSON.parse(localStorage.getItem('bindr:pending') || '{}')[book.id];
   const start = pending?.currentPage || book.currentPage || 1;
 
   const reader = new Reader(view, book, {
+    // Dark/light pages are saved per book, so they follow the book to your other devices.
+    onPageTheme: (pageTheme) => {
+      const local = state.books.find((b) => b.id === book.id);
+      if (local) local.pageTheme = pageTheme;
+      saveBooksLocal();
+      api.updateBook(book.id, { pageTheme }).catch(() => toast('Couldn’t save the page theme. Check your connection.'));
+    },
+    onRate: (b) => rateBook(state.books.find((x) => x.id === b.id) || b),
     onClose: () => {
       if (pushedReader) { pushedReader = false; history.back(); }
       else { history.replaceState(null, '', '/'); route(); }

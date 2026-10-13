@@ -3,18 +3,20 @@ import { openPdf } from './pdf.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
 import { FilterPanel, toGL, toSvgValues, isIdentity } from './filters.js';
-import { imageRects, darken, loadDarkSetting, saveDarkSetting, DARK_BG } from './darkpage.js';
-import { esc, sheet, toast } from './ui.js';
+import { imageRects, darken, DARK_BG } from './darkpage.js';
+import { esc, sheet, menu, toast } from './ui.js';
 
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 export class Reader {
-  constructor(root, book, { onClose, onProgress }) {
+  constructor(root, book, { onClose, onProgress, onPageTheme, onRate }) {
     this.root = root;
     this.book = book;
     this.onClose = onClose;
     this.onProgress = onProgress;
+    this.onPageTheme = onPageTheme;
+    this.onRate = onRate;
     this.page = 1;
     this.cache = new Map(); // page number -> rendered canvas
     this.renderChain = Promise.resolve();
@@ -32,7 +34,8 @@ export class Reader {
       title: root.querySelector('.reader-title'),
       scrubber: root.querySelector('.scrubber'),
       label: root.querySelector('.page-label'),
-      layoutBtn: root.querySelector('[data-action="layout"]'),
+      displayBtn: root.querySelector('[data-action="display"]'),
+      display: root.querySelector('.display-panel'),
     };
     this.spread = false;
     try { this.layoutPref = localStorage.getItem('bindr:layout'); } catch { this.layoutPref = null; }
@@ -49,14 +52,15 @@ export class Reader {
       this.el.fallback.hidden = false;
     }
     this._bind();
-    this.darkPages = loadDarkSetting();
-    this.el.darkBtn = this.root.querySelector('[data-action="dark"]');
-    this.el.darkBtn.onclick = () => this.setDarkPages(!this.darkPages);
+    // Dark pages are a per-book setting, saved with the book in your account.
+    this.darkPages = this.book.pageTheme === 'dark';
+    this._bindDisplay();
     this._syncDark();
     this.filterPanel = new FilterPanel(
-      this.root.querySelector('.filter-panel'),
-      this.root.querySelector('[data-action="filter"]'),
+      this.el.display.querySelector('.fp-embed'),
+      this.el.displayBtn,
       (t) => this._applyFilter(t),
+      { embedded: true },
     );
     this._applyFilter(this.filterPanel.transform);
 
@@ -107,8 +111,10 @@ export class Reader {
   // ---------------------------------------------------------------- dark pages
   /** Dark mode for every book: recolors page background and text, never images. */
   setDarkPages(on) {
+    if (on === this.darkPages) return;
     this.darkPages = on;
-    saveDarkSetting(on);
+    this.book.pageTheme = on ? 'dark' : 'light';
+    this.onPageTheme?.(this.book.pageTheme);
     this._syncDark();
     if (!this.doc) return;
     // Re-render; the current pages stay on screen until their replacements are ready.
@@ -120,8 +126,7 @@ export class Reader {
 
   _syncDark() {
     this.root.classList.toggle('book-dark', this.darkPages);
-    this.el.darkBtn.setAttribute('aria-pressed', String(this.darkPages));
-    this.el.darkBtn.title = this.darkPages ? 'Light pages' : 'Dark pages';
+    this._syncDisplay();
     if (this.renderer && this.dev) this._layout(); // picks up the new background colors
     this._draw();
   }
@@ -165,11 +170,8 @@ export class Reader {
     const canSpread = !!this.renderer && W >= 700 && aspect < 1.2;
     const autoSpread = W >= 900 ? W > H * 1.05 : W > H * 1.25;
     this.spread = canSpread && (this.layoutPref === 'double' || (this.layoutPref !== 'single' && autoSpread));
-    if (this.el.layoutBtn) {
-      this.el.layoutBtn.hidden = !canSpread;
-      this.el.layoutBtn.setAttribute('aria-pressed', String(this.spread));
-      this.el.layoutBtn.title = this.spread ? 'Show one page' : 'Show two pages';
-    }
+    this.canSpread = canSpread;
+    this._syncDisplay();
     let pw;
     let ph;
     if (this.zoom) {
@@ -505,11 +507,70 @@ export class Reader {
     this.el.label.textContent = `${shown} of ${this.numPages}` + (left > 0 ? ` · ${left} page${left === 1 ? '' : 's'} left` : '');
   }
 
-  _toggleLayout() {
-    if (this.turn || this.anim) return;
-    this.layoutPref = this.spread ? 'single' : 'double';
-    try { localStorage.setItem('bindr:layout', this.layoutPref); } catch {}
-    this._relayout();
+  // ---------------------------------------------------------------- display panel ("Aa")
+  _bindDisplay() {
+    const panel = this.el.display;
+    this.el.displayBtn.onclick = () => this._toggleDisplay();
+    panel.querySelector('[data-close]').onclick = () => this._toggleDisplay(false);
+    panel.querySelectorAll('[data-tab]').forEach((t) => (t.onclick = () => {
+      panel.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('active', x === t));
+      panel.querySelectorAll('[data-pane]').forEach((x) => { x.hidden = x.dataset.pane !== t.dataset.tab; });
+    }));
+    panel.querySelectorAll('[data-theme-opt]').forEach((b) => (b.onclick = () => this.setDarkPages(b.dataset.themeOpt === 'dark')));
+    panel.querySelectorAll('[data-layout-opt]').forEach((b) => (b.onclick = () => {
+      if (this.turn || this.anim || b.disabled) return;
+      const v = b.dataset.layoutOpt;
+      this.layoutPref = v === 'auto' ? null : v;
+      try {
+        if (this.layoutPref) localStorage.setItem('bindr:layout', this.layoutPref);
+        else localStorage.removeItem('bindr:layout');
+      } catch {}
+      this._relayout();
+      this._syncDisplay();
+    }));
+    panel.querySelectorAll('[data-zoom-opt]').forEach((b) => (b.onclick = () => {
+      if ((b.dataset.zoomOpt === 'width') !== !!this.zoom) this.toggleZoom();
+      this._syncDisplay();
+    }));
+  }
+
+  _toggleDisplay(open = this.el.display.hidden) {
+    if (open) clearTimeout(this.chromeTimer); // don't auto-hide the toolbars while it's open
+    this.el.display.hidden = !open;
+    this.el.displayBtn.setAttribute('aria-pressed', String(open));
+    if (open) this._syncDisplay();
+  }
+
+  _syncDisplay() {
+    const panel = this.el.display;
+    if (!panel) return;
+    const mark = (sel, on) => panel.querySelectorAll(sel).forEach((b) => {
+      const active = on(b);
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-checked', String(active));
+    });
+    mark('[data-theme-opt]', (b) => (b.dataset.themeOpt === 'dark') === !!this.darkPages);
+    mark('[data-layout-opt]', (b) => b.dataset.layoutOpt === (this.layoutPref || 'auto'));
+    mark('[data-zoom-opt]', (b) => (b.dataset.zoomOpt === 'width') === !!this.zoom);
+    const two = panel.querySelector('[data-layout-opt="double"]');
+    two.disabled = !this.canSpread;
+    panel.querySelector('.layout-note').hidden = !!this.canSpread;
+  }
+
+  async _readerMenu() {
+    const choice = await menu(this.book.title, [
+      { label: 'Go to Page…', value: 'goto' },
+      { label: this.book.rating ? `Rate & Review (${this.book.rating.toFixed(1)} ★)` : 'Rate & Review', value: 'rate' },
+      { label: this.darkPages ? 'Use Light Pages for This Book' : 'Use Dark Pages for This Book', value: 'theme' },
+      { label: 'Close Book', value: 'close' },
+    ]);
+    if (choice === 'goto') this._askPage();
+    if (choice === 'rate') {
+      const updated = await this.onRate?.(this.book);
+      if (updated) Object.assign(this.book, updated);
+    }
+    if (choice === 'theme') this.setDarkPages(!this.darkPages);
+    if (choice === 'close') this.onClose?.();
   }
 
   _toggleChrome(force) {
@@ -524,8 +585,7 @@ export class Reader {
     this.resizeObserver.observe(stage);
 
     this.root.querySelector('[data-action="close"]').onclick = () => this.onClose?.();
-    this.root.querySelector('[data-action="goto"]').onclick = () => this._askPage();
-    if (this.el.layoutBtn) this.el.layoutBtn.onclick = () => this._toggleLayout();
+    this.root.querySelector('[data-action="menu"]').onclick = () => this._readerMenu();
     this.el.scrubber.addEventListener('input', () => {
       this.el.label.textContent = `Page ${this.el.scrubber.value} of ${this.numPages}`;
     });
@@ -686,6 +746,7 @@ export class Reader {
       this._draw();
     }
     this.root.classList.toggle('zoomed', this.zoom);
+    this._syncDisplay();
   }
 
   _tap([x]) {

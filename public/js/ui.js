@@ -43,6 +43,7 @@ export function sheet(html, setup) {
 
 /** A simple action menu. items: [{label, value, danger}] */
 export function menu(title, items) {
+  items = items.filter(Boolean);
   return sheet(
     `${title ? `<h3>${esc(title)}</h3>` : ''}<div class="menu">${items
       .map((it, i) => `<button data-i="${i}" class="${it.danger ? 'danger' : ''}">${esc(it.label)}</button>`)
