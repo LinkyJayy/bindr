@@ -3,6 +3,8 @@
 // Sends Bindr's emails (verification and password-reset codes).
 //
 // Pick ONE of these in the environment:
+//   GMAIL_SCRIPT_URL + GMAIL_SCRIPT_SECRET – free: sends from your own Gmail through a
+//                     Google Apps Script (tools/gmail-sender.gs); about 100 emails a day
 //   RESEND_API_KEY  – https://resend.com (HTTP API; works on every Railway plan)
 //   BREVO_API_KEY   – https://brevo.com  (HTTP API; can send from a single verified address, no domain needed)
 //   SMTP_URL        – e.g. smtps://user:pass@smtp.example.com:465 (Railway only allows SMTP on Pro plans)
@@ -24,7 +26,8 @@ function smtpTransport() {
   return smtp;
 }
 
-const provider = process.env.RESEND_API_KEY ? 'resend'
+const provider = process.env.GMAIL_SCRIPT_URL ? 'gmail'
+  : process.env.RESEND_API_KEY ? 'resend'
   : process.env.BREVO_API_KEY ? 'brevo'
   : process.env.SMTP_URL ? 'smtp'
   : null;
@@ -41,7 +44,18 @@ async function post(url, headers, body) {
 
 /** Sends an email. Returns 'sent' or 'logged' (no email service set up). Throws on failure. */
 async function sendMail({ to, subject, text, html }) {
-  if (provider === 'resend') {
+  if (provider === 'gmail') {
+    // Apps Script answers a POST with a redirect to the result, which fetch follows.
+    const res = await fetch(process.env.GMAIL_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret: process.env.GMAIL_SCRIPT_SECRET || '', to, subject, text, html, name: parseFrom(FROM).name }),
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000),
+    });
+    const body = (await res.text().catch(() => '')).trim();
+    if (!res.ok || body !== 'ok') throw new Error(`Gmail script: ${res.status} ${body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
+  } else if (provider === 'resend') {
     await post('https://api.resend.com/emails', { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
       { from: FROM, to: [to], subject, text, html });
   } else if (provider === 'brevo') {

@@ -50,7 +50,7 @@ Optional environment variables:
 | `DICTIONARY_URL`| `https://api.dictionaryapi.dev/api/v2/entries/en/` | Dictionary service (same JSON format) |
 | `ADMIN_EMAILS`  | `ljmiller2389@gmail.com`                     | Comma-separated accounts allowed to edit the About page |
 | `PORT`          | set by Railway                               | HTTP port                   |
-| `RESEND_API_KEY` / `BREVO_API_KEY` / `SMTP_URL` | none | Email service for verification and reset codes (see below) |
+| `GMAIL_SCRIPT_URL` + `GMAIL_SCRIPT_SECRET` / `RESEND_API_KEY` / `BREVO_API_KEY` / `SMTP_URL` | none | Email service for verification and reset codes (see below) |
 | `EMAIL_FROM`    | `Bindr <onboarding@resend.dev>`              | Sender of Bindr's emails    |
 | `REQUIRE_EMAIL_VERIFICATION` | `true` when an email service is set | Set to `false` to make verification optional |
 
@@ -58,6 +58,7 @@ Optional environment variables:
 
 Bindr emails 6-digit codes to verify addresses and to reset passwords. Set up one of these:
 
+- **Your Gmail, free** (`GMAIL_SCRIPT_URL` + `GMAIL_SCRIPT_SECRET`): no domain, organization or payment needed, and it can send to anyone, about 100 emails a day. Follow the steps at the top of [`tools/gmail-sender.gs`](tools/gmail-sender.gs): paste it into a new project at script.google.com, set its `SECRET`, run `authorize`, and deploy it as a web app (Execute as: Me, Who has access: Anyone). Then set `GMAIL_SCRIPT_URL` to the web app URL and `GMAIL_SCRIPT_SECRET` to the same secret.
 - **Resend** (`RESEND_API_KEY`): works on every Railway plan. Until you verify a domain in Resend, it can only send to the email you signed up to Resend with.
 - **Brevo** (`BREVO_API_KEY`): can send from a single verified address, such as a Gmail address, without owning a domain. Set `EMAIL_FROM` to that address.
 - **SMTP** (`SMTP_URL`, e.g. `smtps://user:app-password@smtp.gmail.com:465`): Railway only allows outgoing SMTP on its Pro plan.
