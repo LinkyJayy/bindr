@@ -36,6 +36,11 @@ export const api = {
   fileUrl: (id) => `/api/books/${encodeURIComponent(id)}/file`,
   saveReview: (id, review) => request('PUT', `/api/books/${encodeURIComponent(id)}/review`, review),
   deleteReview: (id) => request('DELETE', `/api/books/${encodeURIComponent(id)}/review`),
+  highlights: (id) => request('GET', `/api/books/${encodeURIComponent(id)}/highlights`),
+  addHighlight: (id, h) => request('POST', `/api/books/${encodeURIComponent(id)}/highlights`, h),
+  updateHighlight: (hid, fields) => request('PATCH', `/api/highlights/${encodeURIComponent(hid)}`, fields),
+  deleteHighlight: (hid) => request('DELETE', `/api/highlights/${encodeURIComponent(hid)}`),
+  define: (word) => request('GET', `/api/define/${encodeURIComponent(word)}`),
   coverUrl: (book) => `/api/books/${encodeURIComponent(book.id)}/cover?v=${book.createdAt}`,
 
   /** Upload with progress reporting (fetch can't report upload progress). */

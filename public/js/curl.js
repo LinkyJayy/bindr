@@ -32,6 +32,11 @@ uniform vec2  uShadowX;     // horizontal extent of the visible pages, for the d
 uniform vec3  uBg;
 uniform vec3  uPaperBack;   // tint of the reverse side of the paper (single page)
 uniform float uDpr;
+uniform float uMode;        // 0 = curl, 1 = slide
+uniform float uShift;       // slide: horizontal shift of the current view (device px)
+uniform float uBPos;        // slide: where the incoming view sits relative to the current one
+uniform vec4  uHas;         // slide: current left, current right, incoming left, incoming right
+uniform vec2  uShadowXB;    // slide: horizontal extent of the incoming view
 uniform mat3  uCM;          // color filter: matrix…
 uniform vec3  uCO;          // …and offset, applied to the page content only
 
@@ -82,9 +87,30 @@ void main() {
   gl_FragColor.rgb += (hash(gl_FragCoord.xy) - 0.5) / 255.0;
 }
 
+// One view (single page, or the two pages of a spread) for the slide animation.
+vec4 slideView(vec2 p, sampler2D L, sampler2D R, float hasL, float hasR) {
+  if (p.y < 0.0 || p.y > uPage.w) return vec4(0.0);
+  if (hasR > 0.5 && p.x >= 0.0 && p.x <= uPage.z) return vec4(filt(texture2D(R, p / uPage.zw).rgb) * gutter(p.x), 1.0);
+  if (hasL > 0.5 && p.x < 0.0 && p.x >= -uPage.z) return vec4(filt(texture2D(L, (p + vec2(uPage.z, 0.0)) / uPage.zw).rgb) * gutter(p.x), 1.0);
+  return vec4(0.0);
+}
+
 void mainImage() {
   vec2 frag = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
   vec2 xw = frag - uPage.xy;
+
+  if (uMode > 0.5) {
+    vec2 pa = xw - vec2(uShift, 0.0);
+    vec2 pb = pa - vec2(uBPos, 0.0);
+    vec4 a = slideView(pa, uLeft, uUnder, uHas.x, uHas.y);
+    if (a.a > 0.5) { gl_FragColor = vec4(a.rgb, 1.0); return; }
+    vec4 b = slideView(pb, uFront, uBack, uHas.z, uHas.w);
+    if (b.a > 0.5) { gl_FragColor = vec4(b.rgb, 1.0); return; }
+    float d1 = boxDist(pa, vec2(uShadowX.x, 0.0), vec2(uShadowX.y, uPage.w));
+    float d2 = boxDist(pb, vec2(uShadowXB.x, 0.0), vec2(uShadowXB.y, uPage.w));
+    gl_FragColor = vec4(uBg * (1.0 - 0.22 * exp(-min(d1, d2) / (7.0 * uDpr))), 1.0);
+    return;
+  }
   vec2 x = uFlip > 0.5 ? vec2(-xw.x, xw.y) : xw;
 
   // Soft drop shadow around the book on the background.
@@ -202,7 +228,8 @@ export class CurlRenderer {
 
     this.u = {};
     for (const n of ['uFront', 'uUnder', 'uBack', 'uLeft', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive',
-      'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr', 'uCM', 'uCO']) {
+      'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr', 'uCM', 'uCO',
+      'uMode', 'uShift', 'uBPos', 'uHas', 'uShadowXB']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     // Texture units, in slot order.
@@ -277,6 +304,13 @@ export class CurlRenderer {
     gl.uniform1f(this.u.uHasLeft, opts.hasLeft ? 1 : 0);
     const [sx0, sx1] = opts.shadowX || [0, page.w];
     gl.uniform2f(this.u.uShadowX, sx0, sx1);
+    gl.uniform1f(this.u.uMode, opts.mode === 'slide' ? 1 : 0);
+    if (opts.mode === 'slide') {
+      gl.uniform1f(this.u.uShift, opts.shift);
+      gl.uniform1f(this.u.uBPos, opts.bpos);
+      gl.uniform4fv(this.u.uHas, opts.has.map((v) => (v ? 1 : 0)));
+      gl.uniform2f(this.u.uShadowXB, opts.shadowXB[0], opts.shadowXB[1]);
+    }
     this.textures.forEach((t, i) => {
       gl.activeTexture(gl.TEXTURE0 + i);
       gl.bindTexture(gl.TEXTURE_2D, t);

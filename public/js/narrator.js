@@ -141,30 +141,9 @@ export class Narrator {
   // ------------------------------------------------------------ text
   pageText(n) {
     if (!this.texts.has(n)) {
-      this.texts.set(n, (async () => {
-        const page = await this.reader.doc.getPage(n);
-        const vp = page.getViewport({ scale: 1 });
-        const content = await page.getTextContent();
-        let text = '';
-        const items = [];
-        for (const it of content.items) {
-          if (typeof it.str !== 'string') continue;
-          if (it.str) {
-            const t = mul(vp.transform, it.transform);
-            const fh = Math.hypot(t[2], t[3]) || 10;
-            items.push({ start: text.length, end: text.length + it.str.length, x: t[4], y: t[5] - fh * 0.85, w: it.width * (vp.scale || 1), h: fh * 1.15 });
-            text += it.str;
-          }
-          if (it.hasEOL) {
-            // Re-join words hyphenated across lines.
-            if (/[\p{L}]-$/u.test(text)) text = text.slice(0, -1) + '\u200b';
-            else text += ' ';
-          } else if (it.str && !/\s$/.test(text)) {
-            text += ' ';
-          }
-        }
-        return { text, items, sentences: splitSentences(text), w: vp.width, h: vp.height };
-      })().catch(() => ({ text: '', items: [], sentences: [], w: 1, h: 1 })));
+      this.texts.set(n, this.reader.doc.pageText(n)
+        .then((d) => ({ ...d, sentences: splitSentences(d.text) }))
+        .catch(() => ({ text: '', items: [], sentences: [], w: 1, h: 1 })));
     }
     return this.texts.get(n);
   }
@@ -366,10 +345,7 @@ export class Narrator {
       return;
     }
     const { css } = r;
-    const left = r.spread && c.page % 2 === 0 ? css.x - css.w : css.x;
-    const s = Math.min(css.w / c.data.w, css.h / c.data.h);
-    const ox = left + (css.w - c.data.w * s) / 2;
-    const oy = (css.h - c.data.h * s) / 2;
+    const { ox, oy, s } = r.pageGeom(c.page, c.data);
     const key = `${c.page}:${c.start}:${ox}:${css.y}:${s}`;
     if (key === this.hlKey && box.childElementCount) return;
     this.hlKey = key;

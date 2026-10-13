@@ -23,6 +23,7 @@ const TMP_DIR = path.join(DATA_DIR, 'tmp');
 for (const dir of [DATA_DIR, BOOKS_DIR, COVERS_DIR, TMP_DIR]) fs.mkdirSync(dir, { recursive: true });
 
 const PORT = Number(process.env.PORT) || 3000;
+const DICTIONARY_URL = process.env.DICTIONARY_URL || 'https://api.dictionaryapi.dev/api/v2/entries/en/';
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 300;
 const SESSION_DAYS = 60;
 const COOKIE = 'bindr_session';
@@ -73,7 +74,32 @@ db.exec(`
   add('review_body', "TEXT NOT NULL DEFAULT ''");
   add('reviewed_at', 'INTEGER');
   add('page_theme', "TEXT NOT NULL DEFAULT 'light'"); // per-book page theme: 'light' | 'dark'
+  add('format', "TEXT NOT NULL DEFAULT 'pdf'");       // 'pdf' | 'epub'
+  add('location', 'INTEGER');                          // ePUB reading position (character offset)
+  add('chapters', 'TEXT');                             // chapters the reader added: JSON [{title, page, loc}]
 }
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS highlights (
+    id         TEXT PRIMARY KEY,
+    book_id    TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    page       INTEGER,            -- PDF page (null for ePUB, whose offsets are book-wide)
+    start      INTEGER NOT NULL,   -- character offsets into the page (PDF) or book (ePUB) text
+    end        INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    color      TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS highlights_book ON highlights(book_id, user_id);
+  CREATE TABLE IF NOT EXISTS definitions (
+    word       TEXT PRIMARY KEY,
+    data       TEXT,               -- JSON, or NULL when the word wasn't found
+    fetched_at INTEGER NOT NULL
+  );
+`);
 
 // Clean up after the Book Store, which has been removed. Books people added from it
 // stay in their libraries as ordinary books.
@@ -127,7 +153,19 @@ function publicBook(b) {
     reviewTitle: b.review_title || '',
     reviewBody: b.review_body || '',
     pageTheme: b.page_theme === 'dark' ? 'dark' : 'light',
+    format: b.format === 'epub' ? 'epub' : 'pdf',
+    location: b.location ?? null,
+    chapters: parseChapters(b.chapters),
   };
+}
+
+function parseChapters(json) {
+  try {
+    const list = JSON.parse(json || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Like cleanText, but keeps line breaks (for review bodies). */
@@ -271,12 +309,23 @@ app.delete('/api/me', auth, async (req, res) => {
 });
 
 // --- books -----------------------------------------------------------------
-const bookPath = (id) => path.join(BOOKS_DIR, `${id}.pdf`);
+const bookPath = (id, format = 'pdf') => path.join(BOOKS_DIR, `${id}.${format === 'epub' ? 'epub' : 'pdf'}`);
 const coverPath = (id) => path.join(COVERS_DIR, `${id}.jpg`);
 
 function removeBookFiles(id) {
-  fs.rm(bookPath(id), { force: true }, () => {});
+  fs.rm(bookPath(id, 'pdf'), { force: true }, () => {});
+  fs.rm(bookPath(id, 'epub'), { force: true }, () => {});
   fs.rm(coverPath(id), { force: true }, () => {});
+}
+
+/** 'pdf', 'epub', or null for anything else. */
+function detectFormat(file) {
+  const head = readHead(file, 1024);
+  // The %PDF header may be preceded by a little junk, which readers tolerate.
+  if (head.includes(Buffer.from('%PDF-'))) return 'pdf';
+  // An ePUB is a ZIP whose first entry is an uncompressed "mimetype" file.
+  if (head[0] === 0x50 && head[1] === 0x4b && head.subarray(0, 120).includes(Buffer.from('application/epub+zip'))) return 'epub';
+  return null;
 }
 
 const upload = multer({
@@ -309,11 +358,11 @@ app.post('/api/books', auth, (req, res) => {
       const msg = err.code === 'LIMIT_FILE_SIZE' ? `File is larger than ${MAX_UPLOAD_MB} MB.` : 'Upload failed.';
       return res.status(400).json({ error: msg });
     }
-    if (!pdf) { cleanup(); return res.status(400).json({ error: 'No PDF file was provided.' }); }
-    // The %PDF header may be preceded by a little junk, which readers tolerate.
-    if (!readHead(pdf.path, 1024).includes(Buffer.from('%PDF-'))) {
+    if (!pdf) { cleanup(); return res.status(400).json({ error: 'No book file was provided.' }); }
+    const format = detectFormat(pdf.path);
+    if (!format) {
       cleanup();
-      return res.status(400).json({ error: 'That file is not a valid PDF.' });
+      return res.status(400).json({ error: 'That file is not a valid PDF or ePUB.' });
     }
     let hasCover = false;
     if (cover) {
@@ -323,9 +372,9 @@ app.post('/api/books', auth, (req, res) => {
 
     const id = newId();
     const originalName = cleanText(pdf.originalname, 255) || 'book.pdf';
-    const fallbackTitle = originalName.replace(/\.pdf$/i, '').replace(/[_]+/g, ' ').trim() || 'Untitled';
+    const fallbackTitle = originalName.replace(/\.(pdf|epub)$/i, '').replace(/[_]+/g, ' ').trim() || 'Untitled';
     try {
-      fs.renameSync(pdf.path, bookPath(id));
+      fs.renameSync(pdf.path, bookPath(id, format));
       if (hasCover) fs.renameSync(cover.path, coverPath(id));
       else if (cover) fs.rm(cover.path, { force: true }, () => {});
       q.insertBook.run({
@@ -339,6 +388,7 @@ app.post('/api/books', auth, (req, res) => {
         has_cover: hasCover ? 1 : 0,
         now: Date.now(),
       });
+      db.prepare('UPDATE books SET format = ? WHERE id = ?').run(format, id);
     } catch (e) {
       console.error(e);
       cleanup();
@@ -370,6 +420,22 @@ app.patch('/api/books/:id', auth, (req, res) => {
     sets.push('page_theme = @page_theme');
     vals.page_theme = req.body.pageTheme;
   }
+  if (req.body.location !== undefined) {
+    sets.push('location = @location');
+    vals.location = Math.max(0, parseInt(req.body.location, 10) || 0);
+  }
+  if (req.body.chapters !== undefined) {
+    if (!Array.isArray(req.body.chapters) || req.body.chapters.length > 1000) {
+      return res.status(400).json({ error: 'Chapters must be a list.' });
+    }
+    const chapters = req.body.chapters.map((c) => ({
+      title: cleanText(c?.title, 200) || 'Chapter',
+      page: Math.max(1, parseInt(c?.page, 10) || 1),
+      ...(Number.isFinite(Number(c?.loc)) && c?.loc !== null && c?.loc !== undefined ? { loc: Math.max(0, parseInt(c.loc, 10)) } : {}),
+    }));
+    sets.push('chapters = @chapters');
+    vals.chapters = JSON.stringify(chapters);
+  }
   if (req.body.reset) sets.push('current_page = 1', 'last_opened_at = NULL');
   if (sets.length) {
     vals.now = Date.now();
@@ -390,7 +456,8 @@ app.get('/api/books/:id/file', auth, (req, res) => {
   const book = q.getBook.get(req.params.id, req.user.id);
   if (!book) return res.status(404).json({ error: 'Book not found.' });
   res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
-  res.sendFile(bookPath(book.id), { headers: { 'Content-Type': 'application/pdf' } }, (err) => {
+  const type = book.format === 'epub' ? 'application/epub+zip' : 'application/pdf';
+  res.sendFile(bookPath(book.id, book.format), { headers: { 'Content-Type': type } }, (err) => {
     if (err && !res.headersSent) res.status(404).json({ error: 'File missing.' });
   });
 });
@@ -425,6 +492,101 @@ app.delete('/api/books/:id/review', auth, (req, res) => {
   res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
 });
 
+// --- highlights ------------------------------------------------------------
+const HIGHLIGHT_COLORS = ['yellow', 'blue', 'pink', 'orange'];
+const publicHighlight = (h) => ({
+  id: h.id, page: h.page, start: h.start, end: h.end, text: h.text, color: h.color, note: h.note,
+  createdAt: h.created_at, updatedAt: h.updated_at,
+});
+
+app.get('/api/books/:id/highlights', auth, (req, res) => {
+  const book = q.getBook.get(req.params.id, req.user.id);
+  if (!book) return res.status(404).json({ error: 'Book not found.' });
+  const rows = db.prepare('SELECT * FROM highlights WHERE book_id = ? AND user_id = ? ORDER BY COALESCE(page, 0), start')
+    .all(book.id, req.user.id);
+  res.json({ highlights: rows.map(publicHighlight) });
+});
+
+app.post('/api/books/:id/highlights', auth, (req, res) => {
+  const book = q.getBook.get(req.params.id, req.user.id);
+  if (!book) return res.status(404).json({ error: 'Book not found.' });
+  const start = parseInt(req.body?.start, 10);
+  const end = parseInt(req.body?.end, 10);
+  const page = req.body?.page == null ? null : parseInt(req.body.page, 10);
+  const text = cleanMultiline(req.body?.text, 5000);
+  const color = HIGHLIGHT_COLORS.includes(req.body?.color) ? req.body.color : 'yellow';
+  if (!(start >= 0) || !(end > start) || !text || (page !== null && !(page >= 1))) {
+    return res.status(400).json({ error: 'Invalid highlight.' });
+  }
+  const id = newId();
+  const now = Date.now();
+  db.prepare(`INSERT INTO highlights (id, book_id, user_id, page, start, end, text, color, note, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, book.id, req.user.id, page, start, end, text, color, cleanMultiline(req.body?.note, 2000), now, now);
+  res.status(201).json({ highlight: publicHighlight(db.prepare('SELECT * FROM highlights WHERE id = ?').get(id)) });
+});
+
+app.patch('/api/highlights/:id', auth, (req, res) => {
+  const h = db.prepare('SELECT * FROM highlights WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!h) return res.status(404).json({ error: 'Highlight not found.' });
+  const color = HIGHLIGHT_COLORS.includes(req.body?.color) ? req.body.color : h.color;
+  const note = req.body?.note !== undefined ? cleanMultiline(req.body.note, 2000) : h.note;
+  db.prepare('UPDATE highlights SET color = ?, note = ?, updated_at = ? WHERE id = ?').run(color, note, Date.now(), h.id);
+  res.json({ highlight: publicHighlight(db.prepare('SELECT * FROM highlights WHERE id = ?').get(h.id)) });
+});
+
+app.delete('/api/highlights/:id', auth, (req, res) => {
+  const r = db.prepare('DELETE FROM highlights WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  if (!r.changes) return res.status(404).json({ error: 'Highlight not found.' });
+  res.json({ ok: true });
+});
+
+// --- dictionary ----------------------------------------------------------------
+// Definitions come from the free dictionaryapi.dev service and are cached here.
+app.get('/api/define/:word', auth, async (req, res) => {
+  const word = String(req.params.word || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}'’-]/gu, '').replace(/’/g, "'").slice(0, 60);
+  if (!word) return res.status(400).json({ error: 'No word given.' });
+  const cached = db.prepare('SELECT * FROM definitions WHERE word = ?').get(word);
+  const fresh = cached && (cached.data || Date.now() - cached.fetched_at < 864e5);
+  if (fresh) {
+    return cached.data ? res.json({ entry: JSON.parse(cached.data) }) : res.status(404).json({ error: `No definition found for “${word}”.` });
+  }
+  try {
+    const r = await fetch(`${DICTIONARY_URL}${encodeURIComponent(word)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (r.status === 404) {
+      db.prepare('INSERT OR REPLACE INTO definitions (word, data, fetched_at) VALUES (?, NULL, ?)').run(word, Date.now());
+      return res.status(404).json({ error: `No definition found for “${word}”.` });
+    }
+    if (!r.ok) throw new Error(`dictionary returned ${r.status}`);
+    const list = await r.json();
+    const first = list[0] || {};
+    const meanings = [];
+    for (const entry of list) {
+      for (const m of entry.meanings || []) {
+        let target = meanings.find((x) => x.partOfSpeech === m.partOfSpeech);
+        if (!target) meanings.push((target = { partOfSpeech: m.partOfSpeech || '', definitions: [] }));
+        for (const d of m.definitions || []) {
+          if (target.definitions.length < 4 && d.definition) {
+            target.definitions.push({ definition: String(d.definition).slice(0, 600), example: d.example ? String(d.example).slice(0, 300) : '' });
+          }
+        }
+      }
+    }
+    const data = {
+      word: first.word || word,
+      phonetic: first.phonetic || (first.phonetics || []).find((p) => p.text)?.text || '',
+      meanings: meanings.slice(0, 5),
+    };
+    db.prepare('INSERT OR REPLACE INTO definitions (word, data, fetched_at) VALUES (?, ?, ?)').run(word, JSON.stringify(data), Date.now());
+    res.json({ entry: data });
+  } catch (e) {
+    console.warn('Dictionary lookup failed:', e.message);
+    res.status(502).json({ error: 'The dictionary is unavailable right now.' });
+  }
+});
+
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // --- static front-end ------------------------------------------------------
@@ -434,6 +596,7 @@ const setMjs = (res, file) => {
   if (file.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
 };
 app.use('/vendor/pdfjs', express.static(PDFJS_DIR, { maxAge: '30d', setHeaders: setMjs }));
+app.use('/vendor/fflate', express.static(path.join(path.dirname(require.resolve('fflate/package.json')), 'esm'), { maxAge: '30d' }));
 app.use('/vendor/pdfjs-assets/cmaps', express.static(path.join(PDFJS_ROOT, 'cmaps'), { maxAge: '30d' }));
 app.use('/vendor/pdfjs-assets/standard_fonts', express.static(path.join(PDFJS_ROOT, 'standard_fonts'), { maxAge: '30d' }));
 

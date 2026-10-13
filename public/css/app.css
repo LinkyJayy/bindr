@@ -325,7 +325,7 @@ button.k-rowitem:hover { background: var(--surface-2); }
 .rating-value { font-size: 28px; font-weight: 800; min-width: 2.2em; font-variant-numeric: tabular-nums; }
 
 /* ---------- reader ---------- */
-.reader { position: fixed; inset: 0; background: var(--reader-bg); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+.reader { position: fixed; inset: 0; background: var(--reader-bg); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .reader.book-dark { --reader-bg: #0c0c0d; }
 .stage { position: absolute; inset: 0; }
 .curl-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -427,3 +427,92 @@ button.k-rowitem:hover { background: var(--surface-2); }
 .tts-rate { border: 1.5px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 10px; min-width: 52px; font-size: 13px; font-weight: 800; margin-left: 6px; }
 .tts-voice { max-width: 150px; border: 1.5px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 10px; font-size: 13px; }
 @media (max-width: 420px) { .tts-voice { max-width: 96px; } }
+
+/* ---------- app-wide color filter ----------
+   Pages are filtered in the page shader; everything else gets the shared SVG filter.
+   Highlights are only filtered when the filter keeps colors (not Grayscale/Achromatopsia). */
+html.cm .k-top, html.cm .k-main, html.cm .k-bottom, html.cm .k-quick-panel, html.cm .sheet,
+html.cm .toast, html.cm .auth, html.cm .reader-bar, html.cm .display-panel, html.cm .tts-player,
+html.cm .reader-status, html.cm .hl-actions { filter: url(#bindr-cm); }
+html.cm-hl .hl-layer, html.cm-hl .tts-highlight, html.cm-hl .hl-colors { filter: url(#bindr-cm); }
+
+/* ---------- bottom nav: the book you're reading ---------- */
+.k-current { flex: 0 1 200px !important; flex-direction: row !important; gap: 8px !important; padding: 0 6px; min-width: 0; }
+.k-current-cover {
+  width: 26px; height: 38px; flex: none; border: 1px solid var(--line); background: var(--surface-2);
+  overflow: hidden; display: block;
+}
+.k-current-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.k-current-title {
+  min-width: 0; max-width: 130px; text-align: left; font-size: 12px; font-weight: 700; color: var(--text);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.2;
+}
+
+/* ---------- highlights ---------- */
+.hl-layer, .sel-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.hl { position: absolute; border-radius: 2px; mix-blend-mode: multiply; }
+.reader.book-dark .hl { mix-blend-mode: screen; }
+.hl-note-mark {
+  position: absolute; width: 0; height: 0; border-left: 7px solid transparent; border-top: 7px solid #111;
+  transform: translateX(-7px);
+}
+.reader.book-dark .hl-note-mark { border-top-color: #e4e4e2; }
+.sel { position: absolute; background: rgba(40, 120, 255, .28); mix-blend-mode: multiply; }
+.reader.book-dark .sel { mix-blend-mode: screen; background: rgba(90, 160, 255, .35); }
+.hl-popup {
+  position: absolute; z-index: 6; background: var(--bg); border: 1.5px solid var(--strong-line); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 8px; display: flex; flex-direction: column; gap: 8px; touch-action: none;
+}
+.hl-colors { display: flex; gap: 10px; justify-content: center; }
+.hl-swatch { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid rgba(0,0,0,.25); padding: 0; }
+.hl-swatch.active { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--strong-line); }
+.sw-yellow { background: #ffd500; }
+.sw-blue { background: #50aaff; }
+.sw-pink { background: #ff5caa; }
+.sw-orange { background: #ff8c1e; }
+.hl-actions { display: flex; border-top: 1px solid var(--line); padding-top: 6px; }
+.hl-actions button { flex: 1; border: 0; background: none; font-size: 14px; font-weight: 700; padding: 6px 10px; border-radius: 6px; white-space: nowrap; }
+.hl-actions button:hover { background: var(--surface-2); }
+.hl-list { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.hl-item { display: flex; align-items: center; border-bottom: 1px solid var(--line); }
+.hl-item-main { flex: 1; display: flex; gap: 12px; border: 0; background: none; text-align: left; padding: 12px 2px; min-width: 0; }
+.hl-bar { width: 5px; border-radius: 3px; flex: none; }
+.hl-item-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 15px; }
+.hl-item-text small { color: var(--muted); font-size: 12px; font-weight: 700; }
+.hl-item-text q { font-family: Georgia, serif; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+.hl-item-note { font-size: 13px; color: var(--muted); }
+.hl-quote { font-family: Georgia, serif; font-style: italic; }
+
+/* ---------- reader status line (bottom right) ---------- */
+.reader-status {
+  position: absolute; z-index: 2; right: max(14px, env(safe-area-inset-right, 0px)); bottom: calc(4px + var(--safe-bottom));
+  border: 0; background: none; padding: 2px 4px; font-size: 11.5px; font-weight: 600; color: #6a6a6a; border-radius: 4px;
+  max-width: calc(100% - 28px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reader.book-dark .reader-status { color: #9a9a9a; }
+
+/* ---------- font tab ---------- */
+.font-row { display: flex; align-items: center; gap: 10px; }
+.font-btn { width: 44px; height: 44px; border: 1.5px solid var(--line); background: var(--surface); border-radius: 8px; font-family: Georgia, serif; flex: none; }
+.font-range { flex: 1; min-width: 0; accent-color: var(--ink); }
+.font-value { font-size: 13px; font-weight: 700; min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+.font-sample { font-family: Georgia, "Iowan Old Style", serif; margin: 12px 0 0; line-height: 1.45; overflow: hidden; max-height: 4.4em; }
+
+/* ---------- chapters ---------- */
+.ch-list { border-top: 1px solid var(--line); max-height: 46dvh; overflow: auto; margin-bottom: 14px; }
+.ch-item { display: flex; align-items: center; border-bottom: 1px solid var(--line); }
+.ch-item.current { box-shadow: inset 4px 0 0 var(--ink); }
+.ch-go { flex: 1; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; border: 0; background: none; text-align: left; padding: 13px 10px; font-size: 15px; min-width: 0; }
+.ch-go span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-go small { color: var(--muted); white-space: nowrap; font-size: 12px; }
+
+/* ---------- dictionary ---------- */
+.dict-label { font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.dict-word { font-family: Georgia, serif; font-size: 26px !important; margin: 4px 0 10px !important; }
+.dict-phon { font-family: inherit; font-size: 16px; font-weight: 400; color: var(--muted); }
+.dict-body { max-height: 52dvh; overflow: auto; }
+.dict-body .spinner { margin: 18px auto; }
+.dict-pos { font-style: italic; font-weight: 700; margin-top: 10px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.dict-body ol { margin: 8px 0; padding-left: 22px; }
+.dict-body li { margin: 6px 0; font-size: 15px; }
+.dict-ex { color: var(--muted); font-style: italic; margin-top: 2px; font-size: 14px; }

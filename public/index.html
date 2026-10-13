@@ -114,14 +114,18 @@
           <svg viewBox="0 0 24 24" width="26" height="26"><path d="M3.5 11 12 4l8.5 7M6 9v11h4.5v-6h3v6H18V9" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" fill="none"/></svg>
           <span>Home</span>
         </button>
+        <button class="k-current" data-current hidden>
+          <span class="k-current-cover"></span>
+          <span class="k-current-title"></span>
+        </button>
         <button data-nav="/library" aria-label="Library">
           <svg viewBox="0 0 24 24" width="26" height="26"><path d="M4 4.5h3.5v15H4zM9.5 4.5H13v15H9.5zM15 5.6l3.3-.9 3.2 14.1-3.3.8z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/></svg>
           <span>Library</span>
         </button>
       </nav>
 
-      <input type="file" class="file-input" accept="application/pdf,.pdf" multiple hidden>
-      <div class="drop-overlay" hidden><div>Drop PDFs to add them to your library</div></div>
+      <input type="file" class="file-input" accept="application/pdf,.pdf,application/epub+zip,.epub" multiple hidden>
+      <div class="drop-overlay" hidden><div>Drop PDF or ePUB books to add them to your library</div></div>
     </div>
   </template>
 
@@ -131,9 +135,13 @@
       <div class="stage">
         <canvas class="curl-canvas"></canvas>
         <div class="fallback-page" hidden></div>
+        <div class="hl-layer" aria-hidden="true"></div>
+        <div class="sel-layer" aria-hidden="true"></div>
         <div class="tts-highlight" aria-hidden="true"></div>
+        <div class="hl-popup" role="toolbar" aria-label="Highlight" hidden></div>
         <div class="reader-loading"><div class="spinner"></div><p>Opening book…</p></div>
       </div>
+      <button class="reader-status" type="button" aria-label="Reading progress (tap to switch)"></button>
       <header class="reader-bar top">
         <button class="icon-btn" data-action="close" aria-label="Back">
           <svg viewBox="0 0 24 24" width="24" height="24"><path d="m15 5-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
@@ -153,6 +161,7 @@
       <div class="display-panel" role="dialog" aria-label="Display settings" hidden>
         <div class="dp-tabs" role="tablist">
           <button class="dp-tab active" data-tab="themes" role="tab">Themes</button>
+          <button class="dp-tab" data-tab="font" role="tab">Font</button>
           <button class="dp-tab" data-tab="layout" role="tab">Layout</button>
           <button class="dp-tab" data-tab="color" role="tab">Color</button>
           <button class="icon-btn dp-close" data-close aria-label="Close display settings">
@@ -167,6 +176,19 @@
           </div>
           <p class="dp-note">Dark recolors the page and its text but never the pictures. It's saved with this book only.</p>
         </div>
+        <div class="dp-pane" data-pane="font" hidden>
+          <div class="font-controls">
+            <div class="dp-label">Font size</div>
+            <div class="font-row">
+              <button class="font-btn" data-font="down" aria-label="Smaller text"><span style="font-size:14px">A</span></button>
+              <input class="font-range" type="range" min="13" max="34" step="1" aria-label="Font size">
+              <button class="font-btn" data-font="up" aria-label="Larger text"><span style="font-size:24px">A</span></button>
+              <span class="font-value"></span>
+            </div>
+            <p class="font-sample">The quick brown fox jumps over the lazy dog.</p>
+          </div>
+          <p class="dp-note font-pdf-note">PDF pages have a fixed layout, so their text can't be resized. Double-tap empty space on a page, or use Layout → Zoom, to make it bigger. Font size works with ePUB books.</p>
+        </div>
         <div class="dp-pane" data-pane="layout" hidden>
           <div class="dp-label">Pages</div>
           <div class="dp-options">
@@ -175,12 +197,20 @@
             <button class="dp-opt" data-layout-opt="double" role="radio">Two pages</button>
           </div>
           <p class="dp-note layout-note" hidden>Two pages need a wider screen.</p>
-          <div class="dp-label">Zoom</div>
+          <div class="dp-label">Page turn</div>
           <div class="dp-options">
-            <button class="dp-opt" data-zoom-opt="page" role="radio">Fit page</button>
-            <button class="dp-opt" data-zoom-opt="width" role="radio">Fit width</button>
+            <button class="dp-opt" data-turn-opt="curl" role="radio">Curl</button>
+            <button class="dp-opt" data-turn-opt="slide" role="radio">Slide</button>
+            <button class="dp-opt" data-turn-opt="instant" role="radio">Instant</button>
           </div>
-          <p class="dp-note">Tip: double-tap a page to switch zoom.</p>
+          <div class="zoom-section">
+            <div class="dp-label">Zoom</div>
+            <div class="dp-options">
+              <button class="dp-opt" data-zoom-opt="page" role="radio">Fit page</button>
+              <button class="dp-opt" data-zoom-opt="width" role="radio">Fit width</button>
+            </div>
+            <p class="dp-note">Tip: double-tap empty space on a page to switch zoom. Double-tap a word to look it up.</p>
+          </div>
         </div>
         <div class="dp-pane" data-pane="color" hidden>
           <div class="fp-embed"></div>

@@ -235,3 +235,24 @@ export class FilterPanel {
     this.button.classList.toggle('has-filter', !isIdentity(this.transform));
   }
 }
+
+/**
+ * Apply the color filter to the whole app (it's one setting for every screen and book).
+ * Pages get it in the page shader; the rest of the interface gets an SVG filter. Highlights
+ * keep their real colors under Grayscale and Achromatopsia so they stay distinguishable.
+ */
+export function applyAppFilter(setting = loadSetting()) {
+  const t = transformFor(setting);
+  let svg = document.getElementById('bindr-cm-svg');
+  if (!svg) {
+    document.body.insertAdjacentHTML('beforeend', '<svg id="bindr-cm-svg" width="0" height="0" style="position:absolute;width:0;height:0" aria-hidden="true">'
+      + '<filter id="bindr-cm" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter></svg>');
+    svg = document.getElementById('bindr-cm-svg');
+  }
+  svg.querySelector('feColorMatrix').setAttribute('values', toSvgValues(t));
+  const on = !isIdentity(t);
+  const grayscale = setting.preset === 'grayscale' || (setting.preset === 'colorblind' && setting.colorblind === 'achromatopsia');
+  document.documentElement.classList.toggle('cm', on);
+  document.documentElement.classList.toggle('cm-hl', on && !grayscale);
+  return t;
+}

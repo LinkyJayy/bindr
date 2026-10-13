@@ -1,22 +1,29 @@
 import { api } from './api.js';
-import { openPdf } from './pdf.js';
+import { openBook } from './docs.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
-import { FilterPanel, toGL, toSvgValues, isIdentity } from './filters.js';
-import { imageRects, darken, DARK_BG } from './darkpage.js';
+import { FilterPanel, toGL, isIdentity, applyAppFilter } from './filters.js';
+import { DARK_BG } from './darkpage.js';
+import { Highlights, showDefinition } from './highlights.js';
 import { esc, sheet, menu, toast } from './ui.js';
 
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 export class Reader {
-  constructor(root, book, { onClose, onProgress, onPageTheme, onRate }) {
+  constructor(root, book, { onClose, onProgress, onPageTheme, onRate, onChapters, onFilter }) {
     this.root = root;
     this.book = book;
     this.onClose = onClose;
     this.onProgress = onProgress;
     this.onPageTheme = onPageTheme;
     this.onRate = onRate;
+    this.onChapters = onChapters;
+    this.onFilter = onFilter;
+    const pref = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
+    this.turnMode = pref('bindr:turn', 'curl');                 // 'curl' | 'slide' | 'instant'
+    this.fontSize = Number(pref('bindr:font-size', '19')) || 19; // ePUB text size (px)
+    this.statusMode = pref('bindr:status-mode', 'chapter');      // 'chapter' | 'book'
     this.page = 1;
     this.cache = new Map(); // page number -> rendered canvas
     this.renderChain = Promise.resolve();
@@ -36,6 +43,7 @@ export class Reader {
       label: root.querySelector('.page-label'),
       displayBtn: root.querySelector('[data-action="display"]'),
       display: root.querySelector('.display-panel'),
+      status: root.querySelector('.reader-status'),
     };
     this.spread = false;
     try { this.layoutPref = localStorage.getItem('bindr:layout'); } catch { this.layoutPref = null; }
@@ -73,17 +81,26 @@ export class Reader {
       throw new Error(e.message === 'Failed to fetch' ? 'This book is not available offline yet.' : e.message);
     }
     if (this.destroyed) return;
-    this.doc = await openPdf(data);
+    this.doc = await openBook(this.book.format, data);
     if (this.destroyed) return;
-    this.numPages = this.doc.numPages;
-    const first = await this.doc.getPage(1);
-    const vp = first.getViewport({ scale: 1 });
-    this.aspect = vp.width / vp.height;
-
-    this.page = Math.min(Math.max(1, startPage || 1), this.numPages);
-    this.el.scrubber.max = String(this.numPages);
+    this.root.classList.toggle('reflowable', !!this.doc.reflowable);
+    this.aspect = this.doc.aspect;
     this._layout();
+    if (this.doc.reflowable) {
+      this.doc.layout(this.css.w, this.css.h, { fontSize: this.fontSize });
+      this.numPages = this.doc.numPages;
+      this.page = this.doc.pageForOffset(this.book.location || 0);
+    } else {
+      this.numPages = this.doc.numPages;
+      this.page = Math.min(Math.max(1, startPage || 1), this.numPages);
+    }
+    this.el.scrubber.max = String(this.numPages);
+    this.outline = await this.doc.outline();
+    this._resolveChapters();
+    this._syncDisplay();
     this._updateChrome();
+    this.hl = new Highlights(this);
+    this.hl.load();
     await this._render(this.page);
     if (this.destroyed) return;
     this.el.loading.hidden = true;
@@ -97,6 +114,7 @@ export class Reader {
   destroy() {
     this.destroyed = true;
     this.narrator?.destroy();
+    this.hl?.hidePopup();
     cancelAnimationFrame(this.raf);
     clearTimeout(this.chromeTimer);
     clearTimeout(this.tapTimer);
@@ -139,20 +157,15 @@ export class Reader {
 
   // ---------------------------------------------------------------- color filter
   _applyFilter(t) {
+    // The rest of the app is filtered by applyAppFilter(); pages are filtered here.
+    applyAppFilter(this.filterPanel?.setting);
     if (this.renderer) {
       const g = toGL(t);
       this.renderer.setFilter(g.m, g.o);
       this._draw();
       return;
     }
-    // No WebGL: an SVG color matrix on the flat page does the same job.
-    let svg = this.root.querySelector('.cm-svg');
-    if (!svg) {
-      this.root.insertAdjacentHTML('beforeend', '<svg class="cm-svg" width="0" height="0" style="position:absolute" aria-hidden="true">'
-        + '<filter id="bindr-cm" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter></svg>');
-      svg = this.root.querySelector('.cm-svg');
-    }
-    svg.querySelector('feColorMatrix').setAttribute('values', toSvgValues(t));
+    // No WebGL: the shared SVG color matrix on the flat page does the same job.
     this.el.fallback.style.filter = isIdentity(t) ? '' : 'url(#bindr-cm)';
   }
 
@@ -165,16 +178,25 @@ export class Reader {
     const small = W < 600;
     const mx = small ? 8 : 40;
     const my = small ? 12 : 28;
-    const aspect = this.aspect || 0.7;
+    const reflow = !!this.doc?.reflowable;
+    const statusH = 24; // room for the page status line at the bottom
+    let aspect = this.aspect || 0.7;
     // Two-page spread on landscape tablets and wide screens (unless the reader chose otherwise).
-    const canSpread = !!this.renderer && W >= 700 && aspect < 1.2;
+    const canSpread = !!this.renderer && W >= 700 && (reflow || aspect < 1.2);
     const autoSpread = W >= 900 ? W > H * 1.05 : W > H * 1.25;
     this.spread = canSpread && (this.layoutPref === 'double' || (this.layoutPref !== 'single' && autoSpread));
     this.canSpread = canSpread;
     this._syncDisplay();
     let pw;
     let ph;
-    if (this.zoom) {
+    if (reflow) {
+      // ePUB pages fill the screen like an e-reader; the text reflows to fit.
+      const m = W < 600 ? 0 : 16;
+      const avail = H - statusH - m * 2;
+      pw = this.spread ? Math.min((W - m * 2) / 2, 640) : Math.min(W - m * 2, Math.max(560, avail * 0.75));
+      ph = avail;
+      aspect = pw / ph;
+    } else if (this.zoom) {
       // Zoomed in (double-tap): fill the width and scroll vertically.
       pw = this.spread ? W / 2 : W;
       ph = pw / aspect;
@@ -184,12 +206,13 @@ export class Reader {
       const m = 10;
       pw = (W - m * 2) / 2;
       ph = pw / aspect;
-      if (ph > H - m * 2) { ph = H - m * 2; pw = ph * aspect; }
+      if (ph > H - statusH - m * 2) { ph = H - statusH - m * 2; pw = ph * aspect; }
     } else {
       pw = W - mx * 2;
       ph = pw / aspect;
-      if (ph > H - my * 2) { ph = H - my * 2; pw = ph * aspect; }
+      if (ph > H - statusH - my * 2) { ph = H - statusH - my * 2; pw = ph * aspect; }
     }
+    this.statusH = statusH;
     const max = this.renderer?.maxTex || 4096;
     let scale = dpr;
     if (pw * scale > max || ph * scale > max) scale = Math.min(max / pw, max / ph);
@@ -222,7 +245,7 @@ export class Reader {
 
   /** Vertical position of the page(s): centred, or scrolled when taller than the screen. */
   _applyScroll() {
-    this.css.y = this.overflow > 0 ? -this.scrollY : (this.stageH - this.css.h) / 2;
+    this.css.y = this.overflow > 0 ? -this.scrollY : (this.stageH - (this.statusH || 0) - this.css.h) / 2;
     this.dev.y = Math.round(this.css.y * this.dpr);
     if (!this.renderer) this.el.fallback.style.top = `${this.css.y}px`;
   }
@@ -254,9 +277,11 @@ export class Reader {
     if (this.turn || this.anim) { this.pendingLayout = true; return; }
     const prev = this.dev && `${this.dev.w}x${this.dev.h}`;
     const wasSpread = this.spread;
+    const loc = this.doc.reflowable ? this.doc.pageStart(this.visiblePages()[0] || this.page) : 0;
     this._layout();
-    if (wasSpread !== this.spread) this._updateChrome();
-    if (prev !== `${this.dev.w}x${this.dev.h}`) {
+    const repaginated = this.doc.reflowable && this._paginate(loc);
+    if (wasSpread !== this.spread || repaginated) this._updateChrome();
+    if (repaginated || prev !== `${this.dev.w}x${this.dev.h}`) {
       this.generation++;
       this.cache.clear();
       this.queued.clear();
@@ -264,6 +289,27 @@ export class Reader {
     }
     this._prefetch();
     this._draw();
+  }
+
+  /** Re-paginate a reflowable book, keeping the reader at text offset `loc`. */
+  _paginate(loc) {
+    if (!this.doc.layout(this.css.w, this.css.h, { fontSize: this.fontSize })) return false;
+    this.numPages = this.doc.numPages;
+    this.el.scrubber.max = String(this.numPages);
+    this.page = this.doc.pageForOffset(loc);
+    this.narrator?.texts.clear();
+    this.hl?.reset();
+    this._resolveChapters();
+    this.onProgress?.(this.page, this.numPages, this.doc.pageStart(this.page));
+    return true;
+  }
+
+  /** Where page n's content sits on screen: page-unit origin (css px) and scale. */
+  pageGeom(n, data) {
+    const { css } = this;
+    const left = this.spread && n % 2 === 0 ? css.x - css.w : css.x;
+    const s = Math.min(css.w / data.w, css.h / data.h);
+    return { ox: left + (css.w - data.w * s) / 2, oy: (css.h - data.h * s) / 2, s };
   }
 
   // ---------------------------------------------------------------- rendering
@@ -277,31 +323,16 @@ export class Reader {
       if (this._fresh(n)) return this._fresh(n);
       if (!this._inWindow(n)) { this.queued.delete(n); return null; }
       const { w, h } = this.dev;
-      const page = await this.doc.getPage(n);
-      const base = page.getViewport({ scale: 1 });
-      const scale = Math.min(w / base.width, h / base.height);
-      const viewport = page.getViewport({ scale });
-      let canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, w, h);
-      const offset = [1, 0, 0, 1, (w - viewport.width) / 2, (h - viewport.height) / 2];
-      await page.render({ canvasContext: ctx, viewport, transform: offset }).promise;
-      if (dark) {
-        let rects = [];
-        try {
-          const v = viewport.transform;
-          const base = [v[0], v[1], v[2], v[3], v[4] + offset[4], v[5] + offset[5]];
-          rects = await imageRects(page, base);
-        } catch (e) {
-          console.warn('Could not locate images on page', n, e);
-        }
-        canvas = darken(canvas, rects);
+      let canvas;
+      try {
+        canvas = await this.doc.renderPage(n, w, h, { dark });
+      } catch (e) {
+        // Closing the book (or re-laying it out) cancels renders that are in flight.
+        this.queued.delete(n);
+        if (!this.destroyed && e?.name !== 'RenderingCancelledException') console.warn('Could not render page', n, e);
+        return null;
       }
       canvas.__dark = dark;
-      page.cleanup();
       this.queued.delete(n);
       if (this.destroyed || gen !== this.generation) return null;
       this.cache.set(n, canvas);
@@ -354,6 +385,7 @@ export class Reader {
   _draw() {
     if (this.destroyed || !this.dev) return;
     this.narrator?.updateHighlight();
+    this.hl?.update();
     if (!this.renderer) {
       const c = this.cache.get(this.page);
       if (c && this.el.fallback.firstChild !== c) this.el.fallback.replaceChildren(c);
@@ -361,6 +393,7 @@ export class Reader {
     }
     const { w, h } = this.dev;
     const tex = (n) => (this._exists(n) && this.cache.get(n)) || null;
+    if (this.turn?.mode === 'slide') return this._drawSlide(tex);
     const curl = this.turn ? curlFromCorner(this.turn.C, this.turn.F, w, h) : null;
     if (!this.spread) {
       if (this.turn) {
@@ -392,6 +425,36 @@ export class Reader {
       hasUnder: this._exists(under),
       hasLeft: this._exists(opposite),
       shadowX: [this._exists(L) ? -w : 0, this._exists(R) ? w : 0],
+    });
+  }
+
+  _drawSlide(tex) {
+    const { w } = this.dev;
+    const { dir, p, period } = this.turn;
+    let A;
+    let B;
+    if (this.spread) {
+      const { L, R } = this._pages();
+      A = [L, R];
+      B = dir > 0 ? [R + 1, R + 2] : [L - 2, L - 1];
+    } else {
+      A = [null, this.page];
+      B = [null, this.page + dir];
+    }
+    const has = [A[0], A[1], B[0], B[1]].map((n) => n !== null && this._exists(n));
+    this.renderer.setTexture(3, has[0] ? tex(A[0]) : null);
+    this.renderer.setTexture(1, has[1] ? tex(A[1]) : null);
+    this.renderer.setTexture(0, has[2] ? tex(B[0]) : null);
+    this.renderer.setTexture(2, has[3] ? tex(B[1]) : null);
+    const ext = (l, r) => [l ? -w : 0, r ? w : 0];
+    this.renderer.draw(this.dev, null, this.dpr, {
+      spread: this.spread,
+      mode: 'slide',
+      shift: -dir * p,
+      bpos: dir * period,
+      has,
+      shadowX: ext(has[0], has[1]),
+      shadowXB: ext(has[2], has[3]),
     });
   }
 
@@ -430,8 +493,37 @@ export class Reader {
     // In a spread both directions lift the outer edge of a page (backwards is mirrored);
     // on a single page, turning back pulls the previous page in from the left.
     const fromC = this.spread || dir > 0;
-    this.turn = { dir, C, turned, F: fromC ? [...C] : [...turned] };
+    this.turn = { mode: 'curl', dir, C, turned, F: fromC ? [...C] : [...turned] };
     for (const n of this._turnPages(dir)) this._render(n).then(() => this._draw());
+  }
+
+  _beginSlide(dir) {
+    const period = (this.spread ? this.dev.w * 2 : this.dev.w) + Math.round(28 * this.dpr);
+    this.turn = { mode: 'slide', dir, p: 0, period };
+    for (const n of this._turnPages(dir)) this._render(n).then(() => this._draw());
+  }
+
+  _animateSlide(target, duration, ease, commit) {
+    const from = this.turn.p;
+    const start = performance.now();
+    return new Promise((resolve) => {
+      this.anim = { resolve };
+      const step = (now) => {
+        if (this.destroyed) return resolve();
+        const t = Math.min(1, (now - start) / duration);
+        this.turn.p = from + (target - from) * ease(t);
+        this._draw();
+        if (t < 1) { this.raf = requestAnimationFrame(step); return; }
+        this.anim = null;
+        const dir = this.turn.dir;
+        this.turn = null;
+        if (commit) this._goto(this._afterTurn(dir), true);
+        else this._draw();
+        if (this.pendingLayout) { this.pendingLayout = false; this._relayout(); }
+        resolve();
+      };
+      this.raf = requestAnimationFrame(step);
+    });
   }
 
   _setF(F) {
@@ -471,7 +563,15 @@ export class Reader {
   /** Animated page turn (tap, key, wheel). */
   async turnPage(dir) {
     if (this.anim || this.turn || this.drag || !this._canTurn(dir)) return;
-    if (!this.renderer) return this._goto(this.page + dir);
+    this.hl?.hidePopup();
+    this.hl?.clearSelection();
+    if (!this.renderer || this.turnMode === 'instant') return this._goto(this._afterTurn(dir));
+    if (this.turnMode === 'slide') {
+      this._beginSlide(dir);
+      await Promise.all(this._turnPages(dir).map((n) => this._render(n)));
+      await this._animateSlide(this.turn.period, 380, easeInOut, true);
+      return;
+    }
     this._beginTurn(dir, this.dev.h * 0.62);
     await Promise.all(this._turnPages(dir).map((n) => this._render(n)));
     const target = this.spread || dir > 0 ? this.turn.turned : this.turn.C;
@@ -490,7 +590,7 @@ export class Reader {
     else this._render(n).then(() => this._draw());
     if (!fromTurn) this._draw();
     this._prefetch();
-    this.onProgress?.(this.page, this.numPages);
+    this.onProgress?.(this.page, this.numPages, this.doc?.reflowable ? this.doc.pageStart(this.page) : null);
   }
 
   _updateChrome() {
@@ -505,6 +605,88 @@ export class Reader {
     }
     const left = this.numPages - last;
     this.el.label.textContent = `${shown} of ${this.numPages}` + (left > 0 ? ` · ${left} page${left === 1 ? '' : 's'} left` : '');
+    this._updateStatus(shown, last);
+  }
+
+  // ---------------------------------------------------------------- status line & chapters
+  /** Bottom-right: current page and pages left in the chapter (or book). Tap to switch. */
+  _updateStatus(shown = String(this.page), last = this.page) {
+    const el = this.el.status;
+    if (!el || !this.numPages) return;
+    const pl = (n) => `${n} page${n === 1 ? '' : 's'}`;
+    const bookLeft = Math.max(0, this.numPages - last);
+    const ch = this.chapterAt(last);
+    let tail;
+    if (this.statusMode === 'chapter' && ch) {
+      const left = Math.max(0, ch.end - last);
+      tail = left ? `${pl(left)} left in chapter` : 'Last page of chapter';
+    } else {
+      tail = bookLeft ? `${pl(bookLeft)} left in book` : 'Last page';
+    }
+    el.textContent = `Page ${shown} of ${this.numPages} · ${tail}`;
+    el.title = ch ? `${ch.title} · tap to switch` : 'Add chapters from the ⋮ menu';
+  }
+
+  /** Built-in chapters (table of contents) plus the ones the reader added, with page ranges. */
+  _resolveChapters() {
+    const custom = (this.book.chapters || []).map((c) => ({
+      title: c.title,
+      page: this.doc?.reflowable && Number.isFinite(c.loc) ? this.doc.pageForOffset(c.loc) : c.page,
+      loc: c.loc,
+      custom: true,
+    }));
+    const builtIn = (this.outline || []).filter((c) => (c.depth || 0) === 0 || (this.outline.length < 60 && c.depth <= 1));
+    const all = [...builtIn, ...custom].filter((c) => c.page >= 1 && c.page <= this.numPages).sort((a, b) => a.page - b.page);
+    all.forEach((c, i) => {
+      let next = this.numPages + 1;
+      for (let k = i + 1; k < all.length; k++) if (all[k].page > c.page) { next = all[k].page; break; }
+      c.end = next - 1;
+    });
+    this.chapters = all;
+  }
+
+  chapterAt(page) {
+    let found = null;
+    for (const c of this.chapters || []) if (c.page <= page) found = c;
+    return found;
+  }
+
+  async _chaptersSheet() {
+    const cur = this.chapterAt(this.visiblePages().slice(-1)[0] || this.page);
+    const list = this.chapters || [];
+    const res = await sheet(
+      `<h3>Chapters</h3><p class="sub">${list.length ? 'Tap a chapter to go there.' : 'This book has no chapters yet. Add your own so Bindr can show how many pages are left in each one.'}</p>
+       <div class="ch-list">${list.map((c, i) => `
+         <div class="ch-item ${c === cur ? 'current' : ''}">
+           <button class="ch-go" data-go="${c.page}"><span>${esc(c.title)}</span><small>${c.custom ? 'Yours · ' : ''}page ${c.page}</small></button>
+           ${c.custom ? `<button class="icon-btn" data-del="${i}" aria-label="Remove chapter">
+             <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg></button>` : ''}
+         </div>`).join('')}</div>
+       <form class="ch-add">
+         <label class="field"><span>New chapter starting on page ${this.visiblePages()[0] || this.page}</span>
+           <input name="title" maxlength="200" placeholder="Chapter title" required></label>
+         <div class="actions"><button type="button" class="btn" data-close>Close</button><button class="btn primary">Add Chapter</button></div>
+       </form>`,
+      (el, close) => {
+        el.querySelector('[data-close]').onclick = () => close();
+        el.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => close({ go: +b.dataset.go })));
+        el.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => close({ del: list[+b.dataset.del] })));
+        el.querySelector('form').onsubmit = (e) => { e.preventDefault(); close({ add: e.target.title.value.trim() }); };
+      },
+    );
+    if (!res) return;
+    if (res.go) { this._goto(res.go); return; }
+    let custom = [...(this.book.chapters || [])];
+    if (res.add) {
+      const page = this.visiblePages()[0] || this.page;
+      custom.push({ title: res.add, page, ...(this.doc.reflowable ? { loc: this.doc.pageStart(page) } : {}) });
+    }
+    if (res.del) custom = custom.filter((c) => !(c.title === res.del.title && (c.loc ?? c.page) === (res.del.loc ?? res.del.page)));
+    this.book.chapters = custom;
+    this._resolveChapters();
+    this._updateChrome();
+    this.onChapters?.(custom);
+    if (res.add) this._chaptersSheet();
   }
 
   // ---------------------------------------------------------------- display panel ("Aa")
@@ -528,6 +710,21 @@ export class Reader {
       this._relayout();
       this._syncDisplay();
     }));
+    panel.querySelectorAll('[data-turn-opt]').forEach((b) => (b.onclick = () => {
+      this.turnMode = b.dataset.turnOpt;
+      try { localStorage.setItem('bindr:turn', this.turnMode); } catch {}
+      this._syncDisplay();
+    }));
+    const setFont = (v) => {
+      this.fontSize = Math.min(34, Math.max(13, v));
+      try { localStorage.setItem('bindr:font-size', String(this.fontSize)); } catch {}
+      this._syncDisplay();
+      clearTimeout(this.fontTimer);
+      this.fontTimer = setTimeout(() => this._relayout(), 120);
+    };
+    panel.querySelector('[data-font="down"]').onclick = () => setFont(this.fontSize - 1);
+    panel.querySelector('[data-font="up"]').onclick = () => setFont(this.fontSize + 1);
+    panel.querySelector('.font-range').oninput = (e) => setFont(Number(e.target.value));
     panel.querySelectorAll('[data-zoom-opt]').forEach((b) => (b.onclick = () => {
       if ((b.dataset.zoomOpt === 'width') !== !!this.zoom) this.toggleZoom();
       this._syncDisplay();
@@ -552,6 +749,14 @@ export class Reader {
     mark('[data-theme-opt]', (b) => (b.dataset.themeOpt === 'dark') === !!this.darkPages);
     mark('[data-layout-opt]', (b) => b.dataset.layoutOpt === (this.layoutPref || 'auto'));
     mark('[data-zoom-opt]', (b) => (b.dataset.zoomOpt === 'width') === !!this.zoom);
+    mark('[data-turn-opt]', (b) => b.dataset.turnOpt === this.turnMode);
+    const reflow = !!this.doc?.reflowable;
+    panel.querySelector('.font-controls').hidden = !reflow;
+    panel.querySelector('.font-pdf-note').hidden = reflow;
+    panel.querySelector('.zoom-section').hidden = reflow;
+    panel.querySelector('.font-value').textContent = `${this.fontSize}px`;
+    panel.querySelector('.font-range').value = String(this.fontSize);
+    panel.querySelector('.font-sample').style.fontSize = `${this.fontSize}px`;
     const two = panel.querySelector('[data-layout-opt="double"]');
     two.disabled = !this.canSpread;
     panel.querySelector('.layout-note').hidden = !!this.canSpread;
@@ -559,12 +764,16 @@ export class Reader {
 
   async _readerMenu() {
     const choice = await menu(this.book.title, [
+      { label: 'Chapters', value: 'chapters' },
+      { label: `Notes & Highlights${this.hl?.list.length ? ` (${this.hl.list.length})` : ''}`, value: 'highlights' },
       { label: 'Go to Page…', value: 'goto' },
       { label: this.book.rating ? `Rate & Review (${this.book.rating.toFixed(1)} ★)` : 'Rate & Review', value: 'rate' },
       { label: this.darkPages ? 'Use Light Pages for This Book' : 'Use Dark Pages for This Book', value: 'theme' },
       { label: 'Close Book', value: 'close' },
     ]);
     if (choice === 'goto') this._askPage();
+    if (choice === 'chapters') this._chaptersSheet();
+    if (choice === 'highlights') this.hl?.showList();
     if (choice === 'rate') {
       const updated = await this.onRate?.(this.book);
       if (updated) Object.assign(this.book, updated);
@@ -586,6 +795,12 @@ export class Reader {
 
     this.root.querySelector('[data-action="close"]').onclick = () => this.onClose?.();
     this.root.querySelector('[data-action="menu"]').onclick = () => this._readerMenu();
+    this.el.status.onclick = () => {
+      this.statusMode = this.statusMode === 'chapter' ? 'book' : 'chapter';
+      try { localStorage.setItem('bindr:status-mode', this.statusMode); } catch {}
+      if (this.statusMode === 'chapter' && !this.chapters?.length) toast('No chapters yet. Add them from the ⋮ menu → Chapters.');
+      this._updateChrome();
+    };
     this.el.scrubber.addEventListener('input', () => {
       this.el.label.textContent = `Page ${this.el.scrubber.value} of ${this.numPages}`;
     });
@@ -621,6 +836,8 @@ export class Reader {
       this.turnPage(delta > 0 ? 1 : -1);
     }, { passive: false });
 
+    // Long-press is for selecting text, not the browser's image menu.
+    stage.addEventListener('contextmenu', (e) => e.preventDefault());
     stage.addEventListener('pointerdown', (e) => this._down(e));
     stage.addEventListener('pointermove', (e) => this._move(e));
     stage.addEventListener('pointerup', (e) => this._up(e));
@@ -637,7 +854,15 @@ export class Reader {
     if (this.anim) return; // let the running turn finish
     this.el.stage.setPointerCapture(e.pointerId);
     const p = this._local(e);
-    this.drag = { id: e.pointerId, start: p, last: p, t0: performance.now(), samples: [[performance.now(), p[0]]], active: false };
+    const d = { id: e.pointerId, start: p, last: p, t0: performance.now(), samples: [[performance.now(), p[0]]], active: false };
+    this.drag = d;
+    // Press and hold a word to start selecting text.
+    d.pressTimer = setTimeout(async () => {
+      if (this.drag !== d || d.active || d.scrolling || d.dead || !this.hl) return;
+      d.selecting = 'pending';
+      d.selecting = (await this.hl.beginSelect(e.clientX, e.clientY)) ? true : false;
+      if (d.selecting && this.drag !== d) this.hl.endSelect(); // finger already lifted
+    }, 450);
   }
 
   _move(e) {
@@ -650,6 +875,11 @@ export class Reader {
     while (d.samples.length > 2 && now - d.samples[0][0] > 100) d.samples.shift();
     const dx = p[0] - d.start[0];
     const dy = p[1] - d.start[1];
+    if (d.selecting) {
+      if (d.selecting === true) this.hl.extendSelect(e.clientX, e.clientY);
+      return;
+    }
+    if (Math.hypot(dx, dy) >= 8 * this.dpr) clearTimeout(d.pressTimer);
     if (d.scrolling) {
       this.scrollBy(d.clientY - e.clientY);
       d.clientY = e.clientY;
@@ -665,11 +895,21 @@ export class Reader {
       }
       if (Math.abs(dx) < Math.abs(dy) * 0.8) return;
       const dir = dx < 0 ? 1 : -1;
-      if (!this._canTurn(dir) || !this.renderer) { d.dead = true; return; }
+      if (!this._canTurn(dir)) { d.dead = true; return; }
       if (d.dead) return;
       d.active = true;
-      this._beginTurn(dir, Math.min(Math.max(d.start[1], 0), this.dev.h));
+      this.hl?.hidePopup();
+      this.hl?.clearSelection();
       this._toggleChrome(true);
+      if (!this.renderer || this.turnMode === 'instant') { d.instant = dir; return; }
+      if (this.turnMode === 'slide') this._beginSlide(dir);
+      else this._beginTurn(dir, Math.min(Math.max(d.start[1], 0), this.dev.h));
+    }
+    if (d.instant) return;
+    if (this.turn.mode === 'slide') {
+      this.turn.p = Math.min(this.turn.period, Math.max(0, -this.turn.dir * dx));
+      this._draw();
+      return;
     }
     const { C, turned, dir } = this.turn;
     if (this.spread) this._setF([C[0] + (dir > 0 ? dx : -dx), C[1] + dy]); // mirrored when turning back
@@ -681,16 +921,33 @@ export class Reader {
     const d = this.drag;
     if (!d || e.pointerId !== d.id) return;
     this.drag = null;
+    clearTimeout(d.pressTimer);
+    if (d.selecting) {
+      if (d.selecting === true) this.hl.endSelect();
+      return;
+    }
     if (!d.active) {
       if (cancelled || d.dead) return;
       const moved = Math.hypot(d.last[0] - d.start[0], d.last[1] - d.start[1]);
-      if (moved < 10 * this.dpr && performance.now() - d.t0 < 500) this._tapOrDoubleTap(d.start, e.clientY);
+      if (moved < 10 * this.dpr && performance.now() - d.t0 < 450) this._tapOrDoubleTap(d.start, e.clientX, e.clientY);
+      return;
+    }
+    if (d.instant) {
+      if (!cancelled) this._goto(this._afterTurn(d.instant));
       return;
     }
     const s = d.samples;
     const dt = s[s.length - 1][0] - s[0][0];
     const stale = performance.now() - s[s.length - 1][0] > 90; // finger rested before lifting
     const vx = dt > 0 && !stale ? (s[s.length - 1][1] - s[0][1]) / dt / this.dpr : 0; // css px per ms
+    if (this.turn.mode === 'slide') {
+      const { dir, p, period } = this.turn;
+      const v = -dir * vx; // css px/ms in the direction of travel
+      const commit = !cancelled && (v > 0.25 || (v > -0.25 && p > period * 0.3));
+      const target = commit ? period : 0;
+      this._animateSlide(target, Math.min(380, Math.max(140, (Math.abs(target - p) / period) * 420)), easeOutCubic, commit);
+      return;
+    }
     const { dir, F, C, turned } = this.turn;
     const { w } = this.dev;
     let commit;
@@ -711,23 +968,33 @@ export class Reader {
   }
 
   /** Single taps wait briefly so a second tap can make it a double-tap (zoom). */
-  _tapOrDoubleTap(p, clientY) {
+  /** Double-tap a word to look it up; double-tap anywhere else to zoom. */
+  _tapOrDoubleTap(p, clientX, clientY) {
     const now = performance.now();
     const last = this.lastTap;
     if (last && now - last.t < 320 && Math.hypot(p[0] - last.p[0], p[1] - last.p[1]) < 48 * this.dpr) {
       clearTimeout(this.tapTimer);
       this.lastTap = null;
-      this.toggleZoom(clientY);
+      this.hl?.hidePopup();
+      (this.hl ? this.hl.wordAt(clientX, clientY) : Promise.resolve(null)).then((word) => {
+        if (word) showDefinition(word);
+        else this.toggleZoom(clientY);
+      });
       return;
     }
     this.lastTap = { t: now, p };
     clearTimeout(this.tapTimer);
-    this.tapTimer = setTimeout(() => { this.lastTap = null; this._tap(p); }, 260);
+    this.tapTimer = setTimeout(() => {
+      this.lastTap = null;
+      if (this.hl?.tapAt(clientX, clientY)) return; // tapped a highlight, or dismissed the pop-up
+      this._tap(p);
+    }, 260);
   }
 
   /** Toggle between fitting the whole page/spread on screen and fitting the width. */
   toggleZoom(clientY) {
     if (!this.doc || this.turn || this.anim) return;
+    if (this.doc.reflowable) { toast('Use Aa → Font to make the text bigger.'); return; }
     const r = this.el.stage.getBoundingClientRect();
     const y = clientY == null ? r.height / 2 : clientY - r.top;
     const frac = Math.min(1, Math.max(0, (y - this.css.y) / this.css.h)); // keep this spot under the finger

@@ -1,5 +1,5 @@
 // Bindr service worker: offline app shell + offline copies of opened books.
-const VERSION = 'v8';
+const VERSION = 'v9';
 const SHELL = `bindr-shell-${VERSION}`;
 const BOOKS = 'bindr-books';
 
@@ -16,6 +16,10 @@ const SHELL_FILES = [
   '/js/narrator.js',
   '/js/filters.js',
   '/js/darkpage.js',
+  '/js/docs.js',
+  '/js/epub.js',
+  '/js/highlights.js',
+  '/vendor/fflate/browser.js',
   '/js/social.js',
   '/manifest.webmanifest',
   '/icons/icon-32.png',

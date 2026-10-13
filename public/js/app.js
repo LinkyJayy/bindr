@@ -1,5 +1,6 @@
 import { api } from './api.js';
 import { inspectPdf } from './pdf.js';
+import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting } from './filters.js';
 import { Reader } from './reader.js';
 import { esc, sheet, menu, confirmSheet, toast } from './ui.js';
 import { starsHtml, fmtRating, reviewSheet } from './social.js';
@@ -24,6 +25,7 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
 
+applyAppFilter(); // the color filter applies to the whole app
 boot();
 
 async function boot() {
@@ -161,6 +163,26 @@ function setUiTheme(t) {
 }
 
 const THEME_LABEL = { auto: 'Automatic', light: 'Off', dark: 'On' };
+const TURN_LABEL = { curl: 'Curl', slide: 'Slide', instant: 'Instant' };
+
+function filterLabel() {
+  const s = loadSetting();
+  if (s.preset === 'colorblind') return COLORBLIND.find((c) => c.id === s.colorblind)?.label || 'Colorblind';
+  return PRESETS.find((p) => p.id === s.preset)?.label || 'Original';
+}
+
+/** The color filter, for the whole app. */
+function filterSheet() {
+  return sheet(
+    `<h3>Color Filter</h3><p class="sub">Applies to the whole app and every book. Highlights keep their colors in Grayscale and Achromatopsia.</p>
+     <div class="fp-embed"></div>
+     <div class="actions"><button class="btn primary" data-close>Done</button></div>`,
+    (el, close) => {
+      new FilterPanel(el.querySelector('.fp-embed'), el.querySelector('[data-close]'), () => applyAppFilter(loadSetting()), { embedded: true });
+      el.querySelector('[data-close]').onclick = () => close();
+    },
+  ).then(() => renderShelf());
+}
 const LAYOUT_LABEL = { auto: 'Automatic', single: 'One page', double: 'Two pages' };
 
 // ------------------------------------------------------------------ shell (top bar + bottom nav)
@@ -194,6 +216,7 @@ function showShell(view) {
   });
   document.title = `${VIEW_TITLES[view]} · Bindr`;
   renderShelf();
+  updateCurrentNav();
   if (changed) window.scrollTo(0, 0);
 }
 
@@ -258,6 +281,22 @@ function bindShell() {
   });
 }
 
+/** The book you read last, between Home and Library in the bottom bar. */
+function updateCurrentNav() {
+  if (!shell) return;
+  const btn = shell.querySelector('[data-current]');
+  const last = state.books.filter((b) => b.lastOpenedAt).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
+  btn.hidden = !last;
+  if (!last) return;
+  btn.setAttribute('aria-label', `Continue reading ${last.title}`);
+  btn.title = last.title;
+  btn.querySelector('.k-current-cover').innerHTML = last.hasCover
+    ? `<img src="${api.coverUrl(last)}" alt="" onerror="this.remove()">` : '';
+  const pct = progressPct(last);
+  btn.querySelector('.k-current-title').textContent = pct === null ? last.title : `${last.title} · ${pct}%`;
+  btn.onclick = () => navigate(`/read/${last.id}`);
+}
+
 function syncQuick() {
   if (!shell) return;
   const b = shell.querySelector('[data-quick="theme"]');
@@ -301,12 +340,15 @@ function helpSheet() {
   return sheet(
     `<h3>Using Bindr</h3>
      <ul class="help-list">
-       <li><b>Add books:</b> tap <b>+</b> at the top, or drop PDFs onto the window.</li>
+       <li><b>Add books:</b> tap <b>+</b> at the top, or drop PDF or ePUB files onto the window.</li>
+       <li><b>Highlight:</b> press and hold a word, drag to select more, then pick a color.</li>
+       <li><b>Dictionary:</b> double-tap a word.</li>
+       <li><b>Chapters:</b> ⋮ → Chapters while reading. Add your own if the book has none. Tap the page count at the bottom right to switch between chapter and book.</li>
        <li><b>Rate a book:</b> double-tap or press and hold its cover.</li>
        <li><b>More options:</b> the <b>⋮</b> next to a book.</li>
        <li><b>Turn pages:</b> swipe, tap the edges, or use the arrow keys.</li>
-       <li><b>Zoom:</b> double-tap a page.</li>
-       <li><b>Dark pages, layout and color:</b> the <b>Aa</b> button while reading. Dark pages are set per book.</li>
+       <li><b>Zoom:</b> double-tap empty space on a page.</li>
+       <li><b>Dark pages, font size, layout, page turn and color:</b> the <b>Aa</b> button while reading. Dark pages are set per book.</li>
        <li><b>Listen:</b> the microphone while reading.</li>
      </ul>
      <div class="actions"><button class="btn primary" data-ok>Done</button></div>`,
@@ -386,7 +428,7 @@ function bindCards(root) {
 const emptyLibraryHtml = () => `
   <div class="empty">${ICONS.book}
     <h2>Your library is empty</h2>
-    <p>Add a PDF and it will be saved to your account, ready on every device.</p>
+    <p>Add a PDF or ePUB and it will be saved to your account, ready on every device.</p>
     <button class="btn primary" data-action="upload">Add a Book</button>
   </div>`;
 
@@ -525,7 +567,11 @@ function settingsHtml() {
   const u = state.user;
   const mb = state.books.reduce((n, b) => n + (b.size || 0), 0) / 1048576;
   let layout = 'auto';
-  try { layout = localStorage.getItem('bindr:layout') || 'auto'; } catch {}
+  let turnMode = 'curl';
+  try {
+    layout = localStorage.getItem('bindr:layout') || 'auto';
+    turnMode = localStorage.getItem('bindr:turn') || 'curl';
+  } catch {}
   const row = (action, label, value = '', cls = '') =>
     `<button class="k-rowitem ${cls}" data-set="${action}"><span>${label}</span><span class="k-val">${esc(value)}${ICONS.chev}</span></button>`;
   const info = (label, value) => `<div class="k-rowitem"><span>${label}</span><span class="k-val">${esc(value)}</span></div>`;
@@ -541,6 +587,8 @@ function settingsHtml() {
     <div class="k-rows">
       ${row('theme', 'Dark Mode', THEME_LABEL[uiTheme()])}
       ${row('layout', 'Page Layout', LAYOUT_LABEL[layout] || 'Automatic')}
+      ${row('turn', 'Page Turn Animation', TURN_LABEL[turnMode] || 'Curl')}
+      ${row('filter', 'Color Filter', filterLabel())}
     </div>
     <div class="k-group-title">Device</div>
     <div class="k-rows">
@@ -572,6 +620,15 @@ function bindSettings(main) {
         { label: 'Off', value: 'light' },
       ]);
       if (t) { setUiTheme(t); renderShelf(); }
+    }
+    if (a === 'filter') filterSheet();
+    if (a === 'turn') {
+      const t = await menu('Page Turn Animation', [
+        { label: 'Curl: the page curls like paper', value: 'curl' },
+        { label: 'Slide: pages slide sideways', value: 'slide' },
+        { label: 'Instant: no animation', value: 'instant' },
+      ]);
+      if (t) { try { localStorage.setItem('bindr:turn', t); } catch {} renderShelf(); }
     }
     if (a === 'layout') {
       const l = await menu('Page Layout', [
@@ -715,15 +772,18 @@ function renameBook(book) {
 
 // ------------------------------------------------------------------ upload
 async function startUpload(files) {
-  const pdfs = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
-  if (pdfs.length < files.length) toast('Only PDF files can be added.');
+  const isEpub = (f) => f.type === 'application/epub+zip' || /\.epub$/i.test(f.name);
+  const pdfs = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name) || isEpub(f));
+  if (pdfs.length < files.length) toast('Only PDF and ePUB books can be added.');
   if (!pdfs.length) return;
 
   // Read metadata + covers so the user can name each book before uploading.
   const items = await Promise.all(pdfs.map(async (file) => {
-    const fallback = file.name.replace(/\.pdf$/i, '').replace(/[_]+/g, ' ').trim();
+    const fallback = file.name.replace(/\.(pdf|epub)$/i, '').replace(/[_]+/g, ' ').trim();
     try {
-      const info = await inspectPdf(file);
+      const info = isEpub(file)
+        ? await (await import('./epub.js')).EpubDoc.inspect(new Uint8Array(await file.arrayBuffer()))
+        : await inspectPdf(file);
       return { file, ...info, title: info.title || fallback, coverUrl: info.cover && URL.createObjectURL(info.cover) };
     } catch (e) {
       console.warn('Could not read PDF', file.name, e);
@@ -732,7 +792,7 @@ async function startUpload(files) {
   }));
 
   const valid = items.filter((it) => !it.broken);
-  if (valid.length < items.length) toast(`${items.length - valid.length} file(s) could not be read as PDFs.`);
+  if (valid.length < items.length) toast(`${items.length - valid.length} file(s) could not be read as books.`);
   if (!valid.length) return;
 
   const confirmed = await sheet(
@@ -849,14 +909,15 @@ let pendingProgress = null;
 function flushProgress() {
   clearTimeout(progressTimer);
   if (!pendingProgress) return;
-  const { id, currentPage, pageCount } = pendingProgress;
+  const { id, currentPage, pageCount, location } = pendingProgress;
   pendingProgress = null;
-  api.updateBook(id, { currentPage, pageCount })
+  const fields = { currentPage, pageCount, ...(location != null ? { location } : {}) };
+  api.updateBook(id, fields)
     .then(({ book }) => { replaceBook(book); })
     .catch(() => {
       // Offline: remember locally and retry next time we're online.
       const q = JSON.parse(localStorage.getItem('bindr:pending') || '{}');
-      q[id] = { currentPage, pageCount };
+      q[id] = fields;
       localStorage.setItem('bindr:pending', JSON.stringify(q));
     });
 }
@@ -885,6 +946,7 @@ function showReader(book) {
 
   const pending = JSON.parse(localStorage.getItem('bindr:pending') || '{}')[book.id];
   const start = pending?.currentPage || book.currentPage || 1;
+  if (pending?.location != null) book.location = pending.location;
 
   const reader = new Reader(view, book, {
     // Dark/light pages are saved per book, so they follow the book to your other devices.
@@ -895,15 +957,21 @@ function showReader(book) {
       api.updateBook(book.id, { pageTheme }).catch(() => toast('Couldn’t save the page theme. Check your connection.'));
     },
     onRate: (b) => rateBook(state.books.find((x) => x.id === b.id) || b),
+    onChapters: (chapters) => {
+      const local = state.books.find((b) => b.id === book.id);
+      if (local) local.chapters = chapters;
+      saveBooksLocal();
+      api.updateBook(book.id, { chapters }).then((r) => replaceBook(r.book)).catch(() => toast('Couldn’t save your chapters. Check your connection.'));
+    },
     onClose: () => {
       if (pushedReader) { pushedReader = false; history.back(); }
       else { history.replaceState(null, '', '/'); route(); }
     },
-    onProgress: (page, pageCount) => {
+    onProgress: (page, pageCount, location = null) => {
       const local = state.books.find((b) => b.id === book.id);
-      if (local) Object.assign(local, { currentPage: page, pageCount, lastOpenedAt: Date.now() });
+      if (local) Object.assign(local, { currentPage: page, pageCount, lastOpenedAt: Date.now(), ...(location != null ? { location } : {}) });
       saveBooksLocal();
-      pendingProgress = { id: book.id, currentPage: page, pageCount };
+      pendingProgress = { id: book.id, currentPage: page, pageCount, location: location ?? pendingProgress?.location ?? null };
       clearTimeout(progressTimer);
       progressTimer = setTimeout(flushProgress, 800);
     },
