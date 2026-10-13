@@ -20,7 +20,8 @@ Installable as a PWA and ready to deploy on Railway.
 - **Font size.** Aa → Font resizes and reflows ePUB text. PDFs have a fixed layout, so use zoom for them.
 - **Chapters & progress.** The bottom-right corner shows the current page and how many pages are left in the chapter. Tap it to switch to the whole book. Chapters come from the book's table of contents, and you can add your own under ⋮ → Chapters.
 - **Ratings & reviews.** Double-tap or press and hold a book (or use ••• → Rate & Review) to give it 1.0–5.0 stars in half-star steps, with a review title and text. The rating shows on the book in your library.
- Tap the microphone in the reader to listen to the book, using the device's built-in voices. The sentence being read is captioned and highlighted on the page, and pages turn by themselves as reading continues. You can pause, skip back or forward a sentence, change the speed (0.75×–2×) and pick a voice. It needs a PDF with real text; scanned image-only PDFs have nothing to read.
+- **Read aloud.** Tap the microphone in the reader to listen to the book, using the device's built-in voices. The sentence being read is captioned and highlighted on the page, and pages turn by themselves as reading continues. You can pause, skip back or forward a sentence, change the speed (0.75×–2×) and pick a voice. It needs a PDF with real text; scanned image-only PDFs have nothing to read.
+- **About page.** ⋮ → About shows a page written in Markdown (headings, bold, italic, lists, quotes, links, images, code). Everyone can read it; only the owner account (`ADMIN_EMAILS`) sees **Edit**, with a formatting toolbar and a live preview.
 - **PWA.** Installable and works offline: the app shell is cached, and every book you have opened stays readable offline. Progress made offline syncs when you reconnect.
 
 ## Run locally
@@ -47,4 +48,5 @@ Optional environment variables:
 | `DATA_DIR`      | `RAILWAY_VOLUME_MOUNT_PATH`, else `./data`   | Where all data is stored    |
 | `MAX_UPLOAD_MB` | `300`                                        | Maximum book file size      |
 | `DICTIONARY_URL`| `https://api.dictionaryapi.dev/api/v2/entries/en/` | Dictionary service (same JSON format) |
+| `ADMIN_EMAILS`  | `ljmiller2389@gmail.com`                     | Comma-separated accounts allowed to edit the About page |
 | `PORT`          | set by Railway                               | HTTP port                   |

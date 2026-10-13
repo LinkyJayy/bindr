@@ -3,6 +3,7 @@ import { inspectPdf } from './pdf.js';
 import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting, saveSetting, isEink } from './filters.js';
 import { Reader } from './reader.js';
 import { esc, sheet, menu, confirmSheet, toast } from './ui.js';
+import { renderMarkdown } from './md.js';
 import { starsHtml, fmtRating, reviewSheet } from './social.js';
 
 const app = document.getElementById('app');
@@ -52,7 +53,7 @@ function route() {
     if (book) return showReader(book);
     history.replaceState(null, '', '/');
   }
-  const views = { '/': 'home', '/library': 'library', '/settings': 'settings', '/reviews': 'reviews' };
+  const views = { '/': 'home', '/library': 'library', '/settings': 'settings', '/reviews': 'reviews', '/about': 'about' };
   if (!views[location.pathname]) history.replaceState(null, '', '/');
   showShell(views[location.pathname] || 'home');
 }
@@ -214,7 +215,7 @@ const ICONS = {
   book: '<svg class="empty-icon" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5zM12 6.5v13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/></svg>',
 };
 
-const VIEW_TITLES = { home: 'Home', library: 'Library', settings: 'Settings', reviews: 'Ratings & Reviews' };
+const VIEW_TITLES = { home: 'Home', library: 'Library', settings: 'Settings', reviews: 'Ratings & Reviews', about: 'About' };
 
 function showShell(view) {
   closeReader();
@@ -232,6 +233,7 @@ function showShell(view) {
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
   document.title = `${VIEW_TITLES[view]} · Bindr`;
+  if (view === 'about' && changed && !about.editing) about.loaded = false;
   renderShelf();
   updateCurrentNav();
   if (changed) window.scrollTo(0, 0);
@@ -350,12 +352,14 @@ async function moreMenu() {
     { label: 'Ratings & Reviews', value: 'reviews' },
     { label: 'Settings', value: 'settings' },
     { label: 'Help', value: 'help' },
+    { label: 'About', value: 'about' },
   ]);
   if (choice === 'sync') syncLibrary();
   if (choice === 'upload') shell.querySelector('.file-input').click();
   if (choice === 'reviews') navigate('/reviews');
   if (choice === 'settings') navigate('/settings');
   if (choice === 'help') helpSheet();
+  if (choice === 'about') navigate('/about');
 }
 
 function helpSheet() {
@@ -376,6 +380,128 @@ function helpSheet() {
      <div class="actions"><button class="btn primary" data-ok>Done</button></div>`,
     (el, close) => { el.querySelector('[data-ok]').onclick = () => close(); },
   );
+}
+
+// ------------------------------------------------------------------ about page
+// Everyone can read it; the owner's account (checked by the server) can edit it in Markdown.
+const about = { loaded: false, loading: false, content: '', updatedAt: null, canEdit: false, editing: false, draft: '', tab: 'write' };
+
+async function loadAbout() {
+  if (about.loading) return;
+  about.loading = true;
+  try {
+    Object.assign(about, await api.about(), { loaded: true, error: null });
+    localStorage.setItem('bindr:about', JSON.stringify({ content: about.content, updatedAt: about.updatedAt }));
+  } catch (e) {
+    const cached = JSON.parse(localStorage.getItem('bindr:about') || 'null');
+    if (cached) Object.assign(about, cached, { loaded: true, canEdit: false });
+    about.error = e.offline ? 'You’re offline. Showing the last version you saw.' : e.message;
+  } finally {
+    about.loading = false;
+    if (state.view === 'about' && !about.editing) renderShelf();
+  }
+}
+
+const ABOUT_PLACEHOLDER = '*Nothing here yet.*';
+const MD_TOOLS = [
+  { id: 'h', label: 'H', title: 'Heading', before: '## ', after: '', line: true },
+  { id: 'b', label: '<b>B</b>', title: 'Bold', before: '**', after: '**' },
+  { id: 'i', label: '<i>I</i>', title: 'Italic', before: '*', after: '*' },
+  { id: 'link', label: 'Link', title: 'Link', before: '[', after: '](https://)' },
+  { id: 'ul', label: '• List', title: 'Bulleted list', before: '- ', after: '', line: true },
+  { id: 'ol', label: '1. List', title: 'Numbered list', before: '1. ', after: '', line: true },
+  { id: 'q', label: '“ Quote', title: 'Quote', before: '> ', after: '', line: true },
+  { id: 'code', label: '&lt;/&gt;', title: 'Code', before: '`', after: '`' },
+];
+
+function aboutHtml() {
+  if (!about.loaded) {
+    loadAbout();
+    return '<h1 class="k-page-title">About</h1><div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
+  }
+  const updated = about.updatedAt
+    ? `Updated ${new Date(about.updatedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}` : '';
+  if (about.editing) {
+    return `<div class="about-head"><h1 class="k-page-title">Edit About</h1></div>
+      <div class="seg about-tabs" role="tablist">
+        <button type="button" class="seg-btn ${about.tab === 'write' ? 'active' : ''}" data-about-tab="write">Write</button>
+        <button type="button" class="seg-btn ${about.tab === 'preview' ? 'active' : ''}" data-about-tab="preview">Preview</button>
+      </div>
+      <div class="about-editor ${about.tab}">
+        <div class="about-write">
+          <div class="md-toolbar" role="toolbar" aria-label="Formatting">
+            ${MD_TOOLS.map((t) => `<button type="button" data-md="${t.id}" title="${t.title}" aria-label="${t.title}">${t.label}</button>`).join('')}
+          </div>
+          <textarea class="about-text" spellcheck="true" aria-label="About page (Markdown)" placeholder="# About Bindr&#10;&#10;Write here using Markdown…">${esc(about.draft)}</textarea>
+          <p class="hint-md">Markdown: <code># Heading</code> · <code>**bold**</code> · <code>*italic*</code> · <code>[link](https://…)</code> · <code>- list</code> · <code>&gt; quote</code> · <code>---</code></p>
+        </div>
+        <div class="about-preview md-body">${renderMarkdown(about.draft) || `<p class="muted">${esc('Nothing to preview yet.')}</p>`}</div>
+      </div>
+      <p class="form-error about-error"></p>
+      <div class="about-actions">
+        <button class="btn" data-about="cancel">Cancel</button>
+        <button class="btn primary" data-about="save">Save</button>
+      </div>`;
+  }
+  return `<div class="about-head">
+      <h1 class="k-page-title">About</h1>
+      ${about.canEdit ? '<button class="btn" data-about="edit">Edit</button>' : ''}
+    </div>
+    ${about.error ? `<p class="book-sub" style="margin:0 0 10px">${esc(about.error)}</p>` : ''}
+    <article class="md-body about-body">${renderMarkdown(about.content || ABOUT_PLACEHOLDER)}</article>
+    ${updated ? `<p class="about-updated">${esc(updated)}</p>` : ''}`;
+}
+
+function bindAbout(main) {
+  main.querySelector('[data-about="edit"]')?.addEventListener('click', () => {
+    Object.assign(about, { editing: true, draft: about.content, tab: 'write' });
+    renderShelf();
+    main.querySelector('.about-text')?.focus();
+  });
+  if (!about.editing) return;
+  const ta = main.querySelector('.about-text');
+  const preview = main.querySelector('.about-preview');
+  let t;
+  ta.addEventListener('input', () => {
+    about.draft = ta.value;
+    clearTimeout(t);
+    t = setTimeout(() => { preview.innerHTML = renderMarkdown(about.draft); }, 120); // live preview (wide screens)
+  });
+  main.querySelectorAll('[data-about-tab]').forEach((b) => (b.onclick = () => { about.tab = b.dataset.aboutTab; renderShelf(); }));
+  main.querySelectorAll('[data-md]').forEach((b) => (b.onclick = () => {
+    const tool = MD_TOOLS.find((x) => x.id === b.dataset.md);
+    const { selectionStart: a, selectionEnd: z, value } = ta;
+    if (tool.line) {
+      // Prefix every selected line.
+      const start = value.lastIndexOf('\n', a - 1) + 1;
+      const block = value.slice(start, z).split('\n').map((l) => tool.before + l).join('\n');
+      ta.value = value.slice(0, start) + block + value.slice(z);
+      ta.setSelectionRange(start + block.length, start + block.length);
+    } else {
+      const sel = value.slice(a, z) || (tool.id === 'link' ? 'link text' : 'text');
+      ta.value = value.slice(0, a) + tool.before + sel + tool.after + value.slice(z);
+      ta.setSelectionRange(a + tool.before.length, a + tool.before.length + sel.length);
+    }
+    ta.focus();
+    ta.dispatchEvent(new Event('input'));
+  }));
+  main.querySelector('[data-about="cancel"]').onclick = async () => {
+    if (about.draft !== about.content && !(await confirmSheet('Discard your changes?', 'Your edits to the About page will be lost.', 'Discard'))) return;
+    about.editing = false;
+    renderShelf();
+  };
+  main.querySelector('[data-about="save"]').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      Object.assign(about, await api.saveAbout(about.draft), { editing: false, error: null });
+      localStorage.setItem('bindr:about', JSON.stringify({ content: about.content, updatedAt: about.updatedAt }));
+      renderShelf();
+      toast('About page saved.');
+    } catch (ex) {
+      e.target.disabled = false;
+      main.querySelector('.about-error').textContent = ex.message;
+    }
+  };
 }
 
 // ------------------------------------------------------------------ book cards
@@ -462,10 +588,12 @@ function renderShelf() {
   else if (state.view === 'library') main.innerHTML = libraryHtml();
   else if (state.view === 'settings') main.innerHTML = settingsHtml();
   else if (state.view === 'reviews') main.innerHTML = reviewsHtml();
+  else if (state.view === 'about') main.innerHTML = aboutHtml();
   else main.innerHTML = homeHtml();
   bindCards(main);
   if (state.view === 'library' && !state.query.trim()) bindLibraryBar(main);
   if (state.view === 'settings' && !state.query.trim()) bindSettings(main);
+  if (state.view === 'about' && !state.query.trim()) bindAbout(main);
 }
 
 function shelfRow(title, books, { link } = {}) {

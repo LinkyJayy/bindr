@@ -40,6 +40,8 @@ export const api = {
   addHighlight: (id, h) => request('POST', `/api/books/${encodeURIComponent(id)}/highlights`, h),
   updateHighlight: (hid, fields) => request('PATCH', `/api/highlights/${encodeURIComponent(hid)}`, fields),
   deleteHighlight: (hid) => request('DELETE', `/api/highlights/${encodeURIComponent(hid)}`),
+  about: () => request('GET', '/api/about'),
+  saveAbout: (content) => request('PUT', '/api/about', { content }),
   define: (word) => request('GET', `/api/define/${encodeURIComponent(word)}`),
   coverUrl: (book) => `/api/books/${encodeURIComponent(book.id)}/cover?v=${book.createdAt}`,
 

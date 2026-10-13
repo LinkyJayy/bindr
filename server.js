@@ -24,6 +24,10 @@ for (const dir of [DATA_DIR, BOOKS_DIR, COVERS_DIR, TMP_DIR]) fs.mkdirSync(dir, 
 
 const PORT = Number(process.env.PORT) || 3000;
 const DICTIONARY_URL = process.env.DICTIONARY_URL || 'https://api.dictionaryapi.dev/api/v2/entries/en/';
+// Accounts allowed to edit the About page (comma-separated emails).
+const ADMIN_EMAILS = new Set((process.env.ADMIN_EMAILS || 'ljmiller2389@gmail.com')
+  .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
+const isAdmin = (user) => !!user && ADMIN_EMAILS.has(String(user.email).toLowerCase());
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 300;
 const SESSION_DAYS = 60;
 const COOKIE = 'bindr_session';
@@ -94,6 +98,12 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS highlights_book ON highlights(book_id, user_id);
+  CREATE TABLE IF NOT EXISTS site_pages (
+    slug       TEXT PRIMARY KEY,   -- e.g. 'about'
+    content    TEXT NOT NULL,      -- Markdown
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+  );
   CREATE TABLE IF NOT EXISTS definitions (
     word       TEXT PRIMARY KEY,
     data       TEXT,               -- JSON, or NULL when the word wasn't found
@@ -186,7 +196,7 @@ function cleanText(v, max) {
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({ limit: '256kb' }));
 app.use(cookieParser());
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -611,6 +621,24 @@ app.delete('/api/highlights/:id', auth, (req, res) => {
   const r = db.prepare('DELETE FROM highlights WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   if (!r.changes) return res.status(404).json({ error: 'Highlight not found.' });
   res.json({ ok: true });
+});
+
+// --- About page --------------------------------------------------------------
+// Everyone signed in can read it; only admin accounts (ADMIN_EMAILS) can change it.
+app.get('/api/about', auth, (req, res) => {
+  const row = db.prepare("SELECT content, updated_at FROM site_pages WHERE slug = 'about'").get();
+  res.json({ content: row?.content ?? '', updatedAt: row?.updated_at ?? null, canEdit: isAdmin(req.user) });
+});
+
+app.put('/api/about', auth, (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only the owner of Bindr can edit the About page.' });
+  if (typeof req.body?.content !== 'string') return res.status(400).json({ error: 'Content must be text.' });
+  const content = req.body.content.replace(/\r\n?/g, '\n').slice(0, 50000);
+  const now = Date.now();
+  db.prepare(`INSERT INTO site_pages (slug, content, updated_at, updated_by) VALUES ('about', ?, ?, ?)
+    ON CONFLICT (slug) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+    .run(content, now, req.user.id);
+  res.json({ content, updatedAt: now, canEdit: true });
 });
 
 // --- dictionary ----------------------------------------------------------------
