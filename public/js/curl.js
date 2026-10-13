@@ -39,6 +39,7 @@ uniform vec4  uHas;         // slide: current left, current right, incoming left
 uniform vec2  uShadowXB;    // slide: horizontal extent of the incoming view
 uniform mat3  uCM;          // color filter: matrix…
 uniform vec3  uCO;          // …and offset, applied to the page content only
+uniform float uLevels;      // E-ink: number of gray steps (0 = off)
 
 const float PI = 3.14159265;
 
@@ -55,7 +56,15 @@ vec2 uvOf(vec2 p) {
   if (uFlip > 0.5) uv.x = 1.0 - uv.x;
   return uv;
 }
-vec3 filt(vec3 c) { return clamp(uCM * c + uCO, 0.0, 1.0); }
+vec3 filt(vec3 c) {
+  if (uLevels > 1.5) {
+    // E-ink: quantize the gray level first, then tint, so every shade stays neutral.
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    l = floor(l * (uLevels - 1.0) + 0.5) / (uLevels - 1.0);
+    c = vec3(l);
+  }
+  return clamp(uCM * c + uCO, 0.0, 1.0);
+}
 vec3 front(vec2 p) { return filt(texture2D(uFront, uvOf(p)).rgb); }
 vec3 under(vec2 p) { return filt(texture2D(uUnder, uvOf(p)).rgb); }
 vec3 leftPage(vec2 p) { return filt(texture2D(uLeft, uvOf(p + vec2(uPage.z, 0.0))).rgb); }
@@ -229,7 +238,7 @@ export class CurlRenderer {
     this.u = {};
     for (const n of ['uFront', 'uUnder', 'uBack', 'uLeft', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive',
       'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr', 'uCM', 'uCO',
-      'uMode', 'uShift', 'uBPos', 'uHas', 'uShadowXB']) {
+      'uMode', 'uShift', 'uBPos', 'uHas', 'uShadowXB', 'uLevels']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     // Texture units, in slot order.
@@ -270,8 +279,8 @@ export class CurlRenderer {
   }
 
   /** Color filter: m = column-major 3×3 (Float32Array), o = offset [r, g, b]. */
-  setFilter(m, o) {
-    this.filter = { m, o };
+  setFilter(m, o, levels = 0) {
+    this.filter = { m, o, levels };
   }
 
   setColors(bg, paperBack) {
@@ -298,6 +307,7 @@ export class CurlRenderer {
     const f = this.filter || { m: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), o: [0, 0, 0] };
     gl.uniformMatrix3fv(this.u.uCM, false, f.m);
     gl.uniform3fv(this.u.uCO, f.o);
+    gl.uniform1f(this.u.uLevels, f.levels || 0);
     gl.uniform1f(this.u.uSpread, opts.spread ? 1 : 0);
     gl.uniform1f(this.u.uFlip, opts.flip ? 1 : 0);
     gl.uniform1f(this.u.uHasUnder, opts.hasUnder === false ? 0 : 1);

@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import { inspectPdf } from './pdf.js';
-import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting } from './filters.js';
+import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting, saveSetting, isEink } from './filters.js';
 import { Reader } from './reader.js';
 import { esc, sheet, menu, confirmSheet, toast } from './ui.js';
 import { starsHtml, fmtRating, reviewSheet } from './social.js';
@@ -159,7 +159,24 @@ function setUiTheme(t) {
     if (t === 'auto') localStorage.removeItem('bindr:ui-theme');
     else localStorage.setItem('bindr:ui-theme', t);
   } catch {}
+  applyAppFilter(); // the filtered page background depends on the theme
   syncQuick();
+}
+
+/** One-tap E-ink look (remembers the filter you had before). */
+function toggleEink() {
+  const cur = loadSetting();
+  if (isEink(cur)) {
+    let prev = null;
+    try { prev = JSON.parse(localStorage.getItem('bindr:filter-before-eink') || 'null'); } catch {}
+    saveSetting(prev && !isEink(prev) ? prev : { ...cur, preset: 'none' });
+  } else {
+    try { localStorage.setItem('bindr:filter-before-eink', JSON.stringify(cur)); } catch {}
+    saveSetting({ ...cur, preset: 'eink' });
+  }
+  applyAppFilter();
+  syncQuick();
+  if (state.view === 'settings') renderShelf();
 }
 
 const THEME_LABEL = { auto: 'Automatic', light: 'Off', dark: 'On' };
@@ -255,6 +272,7 @@ function bindShell() {
   shell.querySelectorAll('[data-quick]').forEach((b) => (b.onclick = async () => {
     const a = b.dataset.quick;
     if (a === 'theme') { setUiTheme(uiIsDark() ? 'light' : 'dark'); return; }
+    if (a === 'eink') { toggleEink(); return; }
     setQuick(false);
     if (a === 'sync') syncLibrary();
     if (a === 'upload') pickFiles();
@@ -299,6 +317,10 @@ function updateCurrentNav() {
 
 function syncQuick() {
   if (!shell) return;
+  const e = shell.querySelector('[data-quick="eink"]');
+  const einkOn = isEink(loadSetting());
+  e.classList.toggle('on', einkOn);
+  e.querySelector('small').textContent = einkOn ? 'On' : 'Off';
   const b = shell.querySelector('[data-quick="theme"]');
   b.classList.toggle('on', uiIsDark());
   b.querySelector('small').textContent = uiIsDark() ? 'On' : 'Off';

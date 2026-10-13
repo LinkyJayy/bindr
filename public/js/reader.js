@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { openBook } from './docs.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
-import { FilterPanel, toGL, isIdentity, applyAppFilter } from './filters.js';
+import { FilterPanel, toGL, isIdentity, applyAppFilter, applyRGB, isEink, EINK_LEVELS } from './filters.js';
 import { DARK_BG } from './darkpage.js';
 import { Highlights, showDefinition } from './highlights.js';
 import { esc, sheet, menu, toast } from './ui.js';
@@ -159,9 +159,11 @@ export class Reader {
   _applyFilter(t) {
     // The rest of the app is filtered by applyAppFilter(); pages are filtered here.
     applyAppFilter(this.filterPanel?.setting);
+    this.filterT = t;
     if (this.renderer) {
       const g = toGL(t);
-      this.renderer.setFilter(g.m, g.o);
+      this.renderer.setFilter(g.m, g.o, isEink(this.filterPanel?.setting) ? EINK_LEVELS : 0);
+      this._setColors();
       this._draw();
       return;
     }
@@ -235,12 +237,38 @@ export class Reader {
     if (this.renderer) {
       this.el.canvas.width = Math.round(W * scale);
       this.el.canvas.height = Math.round(H * scale);
-      const bg = getComputedStyle(this.root).backgroundColor.match(/\d+(\.\d+)?/g)?.map(Number) || [239, 239, 239];
-      const paper = this.darkPages ? DARK_BG.map((v) => v / 255) : [0.985, 0.98, 0.97];
-      this.renderer.setColors(bg.slice(0, 3).map((v) => v / 255), paper);
+      this._setColors();
     } else {
       Object.assign(this.el.fallback.style, { left: `${this.css.x}px`, width: `${pw}px`, height: `${ph}px` });
     }
+  }
+
+  /** Background around the pages (filtered like everything else) and the paper color. */
+  _setColors() {
+    if (!this.renderer) return;
+    const raw = getComputedStyle(this.root).backgroundColor.match(/\d+(\.\d+)?/g)?.map(Number) || [239, 239, 239];
+    let bg = raw.slice(0, 3).map((v) => v / 255);
+    if (this.filterT && !isIdentity(this.filterT)) bg = applyRGB(this.filterT, bg);
+    const paper = this.darkPages ? DARK_BG.map((v) => v / 255) : [0.985, 0.98, 0.97];
+    this.renderer.setColors(bg, paper);
+  }
+
+  /** E-ink screens briefly flash black and white to clear ghosting every few pages. */
+  _einkRefresh() {
+    if (!document.documentElement.classList.contains('eink')) return;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    this.einkTurns = (this.einkTurns || 0) + 1;
+    if (this.einkTurns % 6) return;
+    let el = this.root.querySelector('.eink-flash');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'eink-flash';
+      el.setAttribute('aria-hidden', 'true');
+      this.root.append(el);
+    }
+    el.classList.remove('go');
+    void el.offsetWidth; // restart the animation
+    el.classList.add('go');
   }
 
   /** Vertical position of the page(s): centred, or scrolled when taller than the screen. */
@@ -584,6 +612,7 @@ export class Reader {
     this.page = n;
     if (changed && this.overflow) { this.scrollY = 0; this._applyScroll(); }
     if (changed) this.narrator?.pageChanged();
+    if (changed) this._einkRefresh();
     this._updateChrome();
     this._evict();
     if (this._fresh(n)) this._draw();

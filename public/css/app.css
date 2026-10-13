@@ -516,3 +516,24 @@ html.cm-hl .hl-layer, html.cm-hl .tts-highlight, html.cm-hl .hl-colors { filter:
 .dict-body ol { margin: 8px 0; padding-left: 22px; }
 .dict-body li { margin: 6px 0; font-size: 15px; }
 .dict-ex { color: var(--muted); font-style: italic; margin-top: 2px; font-size: 14px; }
+
+/* ---------- E-ink ---------- */
+html.cm body { background: var(--filtered-bg, var(--bg)); }
+.sw-eink { background: linear-gradient(135deg, #e9e7e0 50%, #222 50%); }
+#eink-grain { display: none; }
+html.eink #eink-grain {
+  display: block; position: fixed; inset: 0; z-index: 9999; pointer-events: none; opacity: .5; mix-blend-mode: multiply;
+  /* Fine paper grain, like the textured surface of an e-ink panel. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .1 0 0 0 0 .1 0 0 0 0 .1 -.62 -.62 -.62 0 1.02'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+html.eink .k-quick-grid { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 420px) { html .k-quick-grid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); } }
+.k-quick-grid { grid-template-columns: repeat(5, 1fr); max-width: 640px; }
+.eink-flash { position: absolute; inset: 0; z-index: 50; pointer-events: none; opacity: 0; background: #111; }
+.eink-flash.go { animation: einkFlash .34s steps(1, end); }
+@keyframes einkFlash {
+  0% { opacity: 1; background: #111; }
+  40% { opacity: 1; background: #e9e7e0; }
+  70% { opacity: 1; background: #111; }
+  100% { opacity: 0; }
+}

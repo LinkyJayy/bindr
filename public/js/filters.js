@@ -49,8 +49,23 @@ function daltonize(type) {
   return affine(I().map((row, i) => row.map((v, j) => v + corr[i][j])));
 }
 
+// E-ink: grayscale on soft warm-gray "paper" with dark-gray "ink", like an e-reader panel.
+export const EINK_PAPER = [0.914, 0.906, 0.878];
+export const EINK_INK = [0.13, 0.13, 0.13];
+export const EINK_LEVELS = 16; // e-ink panels show a limited number of gray shades
+function einkTransform() {
+  return affine(EINK_PAPER.map((p, i) => LUM.map((l) => l * (p - EINK_INK[i]))), [...EINK_INK]);
+}
+export const isEink = (setting) => setting?.preset === 'eink';
+
+/** Apply a transform to an RGB color (0–1 components). */
+export function applyRGB(t, rgb) {
+  return [0, 1, 2].map((i) => Math.min(1, Math.max(0, t.m[i][0] * rgb[0] + t.m[i][1] * rgb[1] + t.m[i][2] * rgb[2] + t.o[i])));
+}
+
 export const PRESETS = [
   { id: 'none', label: 'Original' },
+  { id: 'eink', label: 'E-ink' },
   { id: 'grayscale', label: 'Grayscale' },
   { id: 'vibrant', label: 'Vibrant' },
   { id: 'dull', label: 'Dull' },
@@ -90,6 +105,7 @@ function customTransform(c) {
 export function transformFor(setting) {
   switch (setting?.preset) {
     case 'grayscale': return grayscale();
+    case 'eink': return einkTransform();
     case 'vibrant': return then(saturate(1.7), contrast(1.08));
     case 'dull': return then(then(saturate(0.45), contrast(0.88)), brightness(0.02));
     case 'colorblind':
@@ -124,7 +140,7 @@ export function loadSetting() {
   return { preset: 'none', colorblind: 'deuteranopia', custom: { ...DEFAULT_CUSTOM } };
 }
 
-function saveSetting(s) {
+export function saveSetting(s) {
   try { localStorage.setItem('bindr:filter', JSON.stringify(s)); } catch {}
 }
 
@@ -243,16 +259,38 @@ export class FilterPanel {
  */
 export function applyAppFilter(setting = loadSetting()) {
   const t = transformFor(setting);
+  const eink = isEink(setting);
   let svg = document.getElementById('bindr-cm-svg');
   if (!svg) {
     document.body.insertAdjacentHTML('beforeend', '<svg id="bindr-cm-svg" width="0" height="0" style="position:absolute;width:0;height:0" aria-hidden="true">'
-      + '<filter id="bindr-cm" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter></svg>');
+      + '<filter id="bindr-cm" color-interpolation-filters="sRGB"></filter></svg>');
     svg = document.getElementById('bindr-cm-svg');
   }
-  svg.querySelector('feColorMatrix').setAttribute('values', toSvgValues(t));
+  // E-ink also limits the screen to a few gray steps.
+  const steps = Array.from({ length: EINK_LEVELS }, (_, i) => (i / (EINK_LEVELS - 1)).toFixed(4)).join(' ');
+  // (Gray first, then a few gray steps, then the paper/ink tint, so every shade stays neutral.)
+  svg.querySelector('filter').innerHTML = eink
+    ? `<feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncR type="discrete" tableValues="${steps}"/>`
+      + `<feFuncG type="discrete" tableValues="${steps}"/><feFuncB type="discrete" tableValues="${steps}"/></feComponentTransfer>`
+      + `<feColorMatrix type="matrix" values="${toSvgValues(t)}"/>`
+    : `<feColorMatrix type="matrix" values="${toSvgValues(t)}"/>`;
   const on = !isIdentity(t);
-  const grayscale = setting.preset === 'grayscale' || (setting.preset === 'colorblind' && setting.colorblind === 'achromatopsia');
-  document.documentElement.classList.toggle('cm', on);
-  document.documentElement.classList.toggle('cm-hl', on && !grayscale);
+  const root = document.documentElement;
+  const grayscale = eink || setting.preset === 'grayscale' || (setting.preset === 'colorblind' && setting.colorblind === 'achromatopsia');
+  root.classList.toggle('cm', on);
+  root.classList.toggle('cm-hl', on && !grayscale);
+  root.classList.toggle('eink', eink);
+  // The page background behind the interface gets the same treatment.
+  if (on) {
+    const hex = getComputedStyle(root).getPropertyValue('--bg').trim().replace('#', '');
+    const rgb = hex.length === 6 ? [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) : [1, 1, 1];
+    const f = applyRGB(t, rgb).map((v) => Math.round(v * 255));
+    root.style.setProperty('--filtered-bg', `rgb(${f.join(',')})`);
+  } else {
+    root.style.removeProperty('--filtered-bg');
+  }
+  if (eink && !document.getElementById('eink-grain')) {
+    document.body.insertAdjacentHTML('beforeend', '<div id="eink-grain" aria-hidden="true"></div>');
+  }
   return t;
 }
