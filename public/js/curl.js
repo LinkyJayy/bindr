@@ -40,6 +40,7 @@ uniform vec2  uShadowXB;    // slide: horizontal extent of the incoming view
 uniform mat3  uCM;          // color filter: matrix…
 uniform vec3  uCO;          // …and offset, applied to the page content only
 uniform float uLevels;      // E-ink: number of gray steps (0 = off)
+uniform float uChroma;      // Colorsoft: color steps per channel (0 = black and white)
 
 const float PI = 3.14159265;
 
@@ -56,12 +57,24 @@ vec2 uvOf(vec2 p) {
   if (uFlip > 0.5) uv.x = 1.0 - uv.x;
   return uv;
 }
+// 4×4 ordered-dither threshold in [0, 1).
+float bayer2(vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }
+float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
 vec3 filt(vec3 c) {
   if (uLevels > 1.5) {
     // E-ink: quantize the gray level first, then tint, so every shade stays neutral.
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    l = floor(l * (uLevels - 1.0) + 0.5) / (uLevels - 1.0);
-    c = vec3(l);
+    // Black and white: hard gray steps. Colorsoft: an ordered dither between steps, like the
+    // fine grain of a color e-ink panel. Thresholds stay inside 0.1–0.9 so near-grays stay gray.
+    float t = uChroma > 0.5 ? 0.1 + 0.8 * bayer4(floor(gl_FragCoord.xy / max(uDpr, 1.0))) : 0.5;
+    float q = floor(l * (uLevels - 1.0) + t) / (uLevels - 1.0);
+    if (uChroma > 0.5) {
+      // Colorsoft: keep the color too, in a few steps around the gray level.
+      vec3 ch = floor((c - l) * uChroma + t) / uChroma;
+      c = clamp(vec3(q) + ch, 0.0, 1.0);
+    } else {
+      c = vec3(q);
+    }
   }
   return clamp(uCM * c + uCO, 0.0, 1.0);
 }
@@ -238,7 +251,7 @@ export class CurlRenderer {
     this.u = {};
     for (const n of ['uFront', 'uUnder', 'uBack', 'uLeft', 'uRes', 'uPage', 'uP', 'uD', 'uR', 'uActive',
       'uSpread', 'uFlip', 'uHasUnder', 'uHasLeft', 'uShadowX', 'uBg', 'uPaperBack', 'uDpr', 'uCM', 'uCO',
-      'uMode', 'uShift', 'uBPos', 'uHas', 'uShadowXB', 'uLevels']) {
+      'uMode', 'uShift', 'uBPos', 'uHas', 'uShadowXB', 'uLevels', 'uChroma']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     // Texture units, in slot order.
@@ -279,8 +292,8 @@ export class CurlRenderer {
   }
 
   /** Color filter: m = column-major 3×3 (Float32Array), o = offset [r, g, b]. */
-  setFilter(m, o, levels = 0) {
-    this.filter = { m, o, levels };
+  setFilter(m, o, levels = 0, chroma = 0) {
+    this.filter = { m, o, levels, chroma };
   }
 
   setColors(bg, paperBack) {
@@ -308,6 +321,7 @@ export class CurlRenderer {
     gl.uniformMatrix3fv(this.u.uCM, false, f.m);
     gl.uniform3fv(this.u.uCO, f.o);
     gl.uniform1f(this.u.uLevels, f.levels || 0);
+    gl.uniform1f(this.u.uChroma, f.chroma || 0);
     gl.uniform1f(this.u.uSpread, opts.spread ? 1 : 0);
     gl.uniform1f(this.u.uFlip, opts.flip ? 1 : 0);
     gl.uniform1f(this.u.uHasUnder, opts.hasUnder === false ? 0 : 1);

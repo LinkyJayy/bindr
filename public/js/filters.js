@@ -55,19 +55,33 @@ export const EINK_INK = [0.13, 0.13, 0.13];
 const COOL_PAPER = [0.9, 0.905, 0.91];
 const WARM_PAPER = [0.95, 0.885, 0.76];
 export const DEFAULT_EINK_WARMTH = 35;
-/** Paper and ink colors for an E-ink warmth of 0 (cool gray) … 100 (warm cream, like a frontlight set warm). */
-export function einkColors(warmth = DEFAULT_EINK_WARMTH) {
+/**
+ * Paper and ink colors for an E-ink warmth of 0 (cool gray) … 100 (warm cream, like a frontlight set warm).
+ * Colorsoft paper is a little darker and grayer: the color filter layer over the panel absorbs some light.
+ */
+export function einkColors(warmth = DEFAULT_EINK_WARMTH, colorsoft = false) {
   const w = Math.min(100, Math.max(0, warmth)) / 100;
-  const paper = COOL_PAPER.map((c, i) => c + (WARM_PAPER[i] - c) * w);
+  let paper = COOL_PAPER.map((c, i) => c + (WARM_PAPER[i] - c) * w);
+  if (colorsoft) paper = paper.map((c) => c * 0.93);
   const ink = [0.13 + 0.03 * w, 0.13 + 0.005 * w, 0.13 - 0.02 * w];
   return { paper, ink };
 }
 export const EINK_LEVELS = 16; // e-ink panels show a limited number of gray shades
-function einkTransform(warmth) {
-  const { paper, ink } = einkColors(warmth);
+// Colorsoft: color comes from a filter layer over the e-ink panel, so it's muted and pastel,
+// with only a few steps of each color (about 4,096 colors in all).
+export const COLORSOFT_SATURATION = 0.55;
+export const COLORSOFT_CHROMA_STEPS = 8; // color steps per channel, on top of the gray levels
+function einkTransform(warmth, colorsoft, mute = true) {
+  const { paper, ink } = einkColors(warmth, colorsoft);
+  if (colorsoft) {
+    // Muted color, then mapped between ink and paper channel by channel.
+    const range = affine(paper.map((p, i) => [0, 1, 2].map((j) => (i === j ? p - ink[i] : 0))), [...ink]);
+    return mute ? then(saturate(COLORSOFT_SATURATION), range) : range;
+  }
   return affine(paper.map((p, i) => LUM.map((l) => l * (p - ink[i]))), [...ink]);
 }
 export const isEink = (setting) => setting?.preset === 'eink';
+export const isColorsoft = (setting) => isEink(setting) && setting?.einkType === 'colorsoft';
 
 /** Apply a transform to an RGB color (0–1 components). */
 export function applyRGB(t, rgb) {
@@ -116,7 +130,7 @@ function customTransform(c) {
 export function transformFor(setting) {
   switch (setting?.preset) {
     case 'grayscale': return grayscale();
-    case 'eink': return einkTransform(setting.einkWarmth ?? DEFAULT_EINK_WARMTH);
+    case 'eink': return einkTransform(setting.einkWarmth ?? DEFAULT_EINK_WARMTH, setting.einkType === 'colorsoft');
     case 'vibrant': return then(saturate(1.7), contrast(1.08));
     case 'dull': return then(then(saturate(0.45), contrast(0.88)), brightness(0.02));
     case 'colorblind':
@@ -147,10 +161,10 @@ export function loadSetting() {
   try {
     const s = JSON.parse(localStorage.getItem('bindr:filter') || 'null');
     if (s && typeof s === 'object') {
-      return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, ...s, custom: { ...DEFAULT_CUSTOM, ...s.custom } };
+      return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, einkType: 'bw', ...s, custom: { ...DEFAULT_CUSTOM, ...s.custom } };
     }
   } catch {}
-  return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, custom: { ...DEFAULT_CUSTOM } };
+  return { preset: 'none', colorblind: 'deuteranopia', einkWarmth: DEFAULT_EINK_WARMTH, einkFlash: true, einkType: 'bw', custom: { ...DEFAULT_CUSTOM } };
 }
 
 export function saveSetting(s) {
@@ -202,6 +216,11 @@ export class FilterPanel {
         <div class="chips">${COLORBLIND.map((t) => `<button class="chip" data-cb="${t.id}" role="radio" title="${esc(t.hint)}">${esc(t.label)}<small>${esc(t.hint)}</small></button>`).join('')}</div>
       </div>
       <div class="fp-sub" data-section="eink">
+        <div class="fp-label">Screen</div>
+        <div class="chips" role="radiogroup" aria-label="E-ink screen">
+          <button class="chip" data-einktype="bw" role="radio">Black &amp; White<small>Like Kindle Paperwhite</small></button>
+          <button class="chip" data-einktype="colorsoft" role="radio"><span class="swatch sw-colorsoft"></span>Colorsoft<small>Soft color, like Kindle Colorsoft</small></button>
+        </div>
         <label class="slider"><span>Warmth</span>
           <input type="range" data-eink="warmth" min="0" max="100" step="1" aria-label="E-ink warmth">
           <output data-out="eink-warmth"></output></label>
@@ -223,6 +242,7 @@ export class FilterPanel {
     if (closeBtn) closeBtn.onclick = () => this.toggle(false);
     this.panel.querySelectorAll('[data-preset]').forEach((b) => (b.onclick = () => this._set({ preset: b.dataset.preset })));
     this.panel.querySelectorAll('[data-cb]').forEach((b) => (b.onclick = () => this._set({ preset: 'colorblind', colorblind: b.dataset.cb })));
+    this.panel.querySelectorAll('[data-einktype]').forEach((b) => (b.onclick = () => this._set({ preset: 'eink', einkType: b.dataset.einktype })));
     this.panel.querySelector('[data-eink="warmth"]').addEventListener('input', (e) => {
       this._set({ preset: 'eink', einkWarmth: Number(e.target.value) });
     });
@@ -264,6 +284,11 @@ export class FilterPanel {
       b.classList.toggle('active', on);
       b.setAttribute('aria-checked', String(on));
     });
+    this.panel.querySelectorAll('[data-einktype]').forEach((b) => {
+      const on = b.dataset.einktype === (s.einkType || 'bw');
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-checked', String(on));
+    });
     this.panel.querySelector('[data-section="colorblind"]').hidden = s.preset !== 'colorblind';
     this.panel.querySelector('[data-section="custom"]').hidden = s.preset !== 'custom';
     this.panel.querySelector('[data-section="eink"]').hidden = s.preset !== 'eink';
@@ -291,6 +316,7 @@ export class FilterPanel {
 export function applyAppFilter(setting = loadSetting()) {
   const t = transformFor(setting);
   const eink = isEink(setting);
+  const colorsoft = isColorsoft(setting);
   let svg = document.getElementById('bindr-cm-svg');
   if (!svg) {
     document.body.insertAdjacentHTML('beforeend', '<svg id="bindr-cm-svg" width="0" height="0" style="position:absolute;width:0;height:0" aria-hidden="true">'
@@ -299,18 +325,21 @@ export function applyAppFilter(setting = loadSetting()) {
   }
   // E-ink also limits the screen to a few gray steps.
   const steps = Array.from({ length: EINK_LEVELS }, (_, i) => (i / (EINK_LEVELS - 1)).toFixed(4)).join(' ');
-  // (Gray first, then a few gray steps, then the paper/ink tint, so every shade stays neutral.)
+  const quantize = `<feComponentTransfer><feFuncR type="discrete" tableValues="${steps}"/>`
+    + `<feFuncG type="discrete" tableValues="${steps}"/><feFuncB type="discrete" tableValues="${steps}"/></feComponentTransfer>`;
+  // (Gray first, then a few gray steps, then the paper/ink tint, so every shade stays neutral.
+  // Colorsoft keeps its muted color; grays still stay neutral because each channel steps alike.)
   svg.querySelector('filter').innerHTML = eink
-    ? `<feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncR type="discrete" tableValues="${steps}"/>`
-      + `<feFuncG type="discrete" tableValues="${steps}"/><feFuncB type="discrete" tableValues="${steps}"/></feComponentTransfer>`
-      + `<feColorMatrix type="matrix" values="${toSvgValues(t)}"/>`
+    ? `<feColorMatrix type="saturate" values="${colorsoft ? COLORSOFT_SATURATION : 0}"/>${quantize}`
+      + `<feColorMatrix type="matrix" values="${toSvgValues(colorsoft ? einkTransform(setting.einkWarmth ?? DEFAULT_EINK_WARMTH, true, false) : t)}"/>`
     : `<feColorMatrix type="matrix" values="${toSvgValues(t)}"/>`;
   const on = !isIdentity(t);
   const root = document.documentElement;
-  const grayscale = eink || setting.preset === 'grayscale' || (setting.preset === 'colorblind' && setting.colorblind === 'achromatopsia');
+  const grayscale = (eink && !colorsoft) || setting.preset === 'grayscale' || (setting.preset === 'colorblind' && setting.colorblind === 'achromatopsia');
   root.classList.toggle('cm', on);
   root.classList.toggle('cm-hl', on && !grayscale);
   root.classList.toggle('eink', eink);
+  root.classList.toggle('colorsoft', colorsoft);
   // The page background behind the interface gets the same treatment.
   if (on) {
     const hex = getComputedStyle(root).getPropertyValue('--bg').trim().replace('#', '');
@@ -320,7 +349,7 @@ export function applyAppFilter(setting = loadSetting()) {
   } else {
     root.style.removeProperty('--filtered-bg');
   }
-  if (eink) root.style.setProperty('--eink-paper', `rgb(${einkColors(setting.einkWarmth).paper.map((v) => Math.round(v * 255)).join(',')})`);
+  if (eink) root.style.setProperty('--eink-paper', `rgb(${einkColors(setting.einkWarmth, colorsoft).paper.map((v) => Math.round(v * 255)).join(',')})`);
   if (eink && !document.getElementById('eink-grain')) {
     document.body.insertAdjacentHTML('beforeend', '<div id="eink-grain" aria-hidden="true"></div>');
   }

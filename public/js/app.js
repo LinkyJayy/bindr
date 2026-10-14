@@ -408,6 +408,7 @@ const TURN_LABEL = { curl: 'Curl', slide: 'Slide', instant: 'Instant' };
 function filterLabel() {
   const s = loadSetting();
   if (s.preset === 'colorblind') return COLORBLIND.find((c) => c.id === s.colorblind)?.label || 'Colorblind';
+  if (s.preset === 'eink' && s.einkType === 'colorsoft') return 'E-ink (Colorsoft)';
   return PRESETS.find((p) => p.id === s.preset)?.label || 'Original';
 }
 

@@ -545,6 +545,7 @@ html.cm-hl .hl-layer, html.cm-hl .tts-highlight, html.cm-hl .hl-colors { filter:
 /* ---------- E-ink ---------- */
 html.cm body { background: var(--filtered-bg, var(--bg)); }
 .sw-eink { background: linear-gradient(135deg, #e9e7e0 50%, #222 50%); }
+.sw-colorsoft { background: conic-gradient(#c98d86, #cdb67e, #93ae8c, #8aa0b8, #a892ad, #c98d86); }
 #eink-grain { display: none; }
 html.eink #eink-grain {
   display: block; position: fixed; inset: 0; z-index: 9999; pointer-events: none; opacity: .5; mix-blend-mode: multiply;

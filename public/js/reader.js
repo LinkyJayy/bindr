@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { openBook } from './docs.js';
 import { CurlRenderer, curlFromCorner, constrainToSpine } from './curl.js';
 import { Narrator } from './narrator.js';
-import { FilterPanel, toGL, isIdentity, applyAppFilter, applyRGB, isEink, EINK_LEVELS, loadSetting } from './filters.js';
+import { FilterPanel, toGL, isIdentity, applyAppFilter, applyRGB, isEink, isColorsoft, EINK_LEVELS, COLORSOFT_CHROMA_STEPS, loadSetting } from './filters.js';
 import { DARK_BG } from './darkpage.js';
 import { Highlights, showDefinition } from './highlights.js';
 import { esc, sheet, menu, toast } from './ui.js';
@@ -162,7 +162,8 @@ export class Reader {
     this.filterT = t;
     if (this.renderer) {
       const g = toGL(t);
-      this.renderer.setFilter(g.m, g.o, isEink(this.filterPanel?.setting) ? EINK_LEVELS : 0);
+      const fs = this.filterPanel?.setting;
+      this.renderer.setFilter(g.m, g.o, isEink(fs) ? EINK_LEVELS : 0, isColorsoft(fs) ? COLORSOFT_CHROMA_STEPS : 0);
       this._setColors();
       this._draw();
       return;
