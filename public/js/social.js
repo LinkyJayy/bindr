@@ -73,6 +73,8 @@ export function reviewSheet(book) {
        <div class="rating-row"><div class="star-input"></div><div class="rating-value">–</div></div>
        <label class="field"><span>Review title</span><input name="title" maxlength="120" placeholder="Sum it up in a few words" value="${esc(book.reviewTitle)}"></label>
        <label class="field"><span>Review</span><textarea name="body" maxlength="5000" rows="5" placeholder="What did you think?">${esc(book.reviewBody)}</textarea></label>
+       <label class="share-row"><input type="checkbox" name="share" ${book.rating ? (book.reviewPublic ? 'checked' : '') : 'checked'}>
+         <span><b>Share in the Book Store</b><small>Everyone on Bindr can see your name, rating and review, with this book's title, author and cover. The book itself is never shared.</small></span></label>
        <p class="form-error"></p>
        <div class="actions">
          ${book.rating ? '<button type="button" class="btn ghost danger-text" data-remove>Remove</button>' : ''}
@@ -96,9 +98,9 @@ export function reviewSheet(book) {
         if (!rating) { el.querySelector('.form-error').textContent = 'Tap the stars to choose a rating.'; return; }
         try {
           const { book: updated } = await api.saveReview(book.id, {
-            rating, title: form.title.value.trim(), body: form.body.value.trim(),
+            rating, title: form.title.value.trim(), body: form.body.value.trim(), public: form.share.checked,
           });
-          toast('Review saved.');
+          toast(form.share.checked ? 'Review saved and shared in the Book Store.' : 'Review saved.');
           close(updated);
         } catch (ex) {
           el.querySelector('.form-error').textContent = ex.message;

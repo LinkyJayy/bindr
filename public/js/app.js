@@ -1,4 +1,4 @@
-import { api, onNeedsVerification } from './api.js';
+import { api } from './api.js';
 import { inspectPdf } from './pdf.js';
 import { FilterPanel, applyAppFilter, PRESETS, COLORBLIND, loadSetting, saveSetting, isEink } from './filters.js';
 import { Reader } from './reader.js';
@@ -40,26 +40,15 @@ async function boot() {
     if (cached) state.user = JSON.parse(cached);
   }
   if (!state.user) return showAuth();
-  if (state.user.mustVerify) return showVerify();
   await loadBooks();
   route();
 }
 
-// The server asks for a verified email (e.g. verification was switched on after sign-in).
-onNeedsVerification(() => {
-  if (!state.user || document.querySelector('.verify-card')) return;
-  state.user.mustVerify = true;
-  showVerify();
-});
-
-/** Saves the signed-in account and opens the app (or the verify screen first). */
-async function signedIn(user, { delivery = null, recoveryKey = null, keyIntro } = {}) {
+/** Saves the signed-in account and opens the app (showing a new recovery code first). */
+async function signedIn(user, { recoveryCode = null, codeIntro } = {}) {
   state.user = user;
   localStorage.setItem('bindr:user', JSON.stringify(user));
-  if (recoveryKey) return showRecoveryKey(recoveryKey, () => signedIn(user, { delivery }), { intro: keyIntro });
-  if (user.mustVerify) return showVerify({ delivery });
-  // The owner's account gets a code even when verification is optional.
-  if (delivery && !user.verified) return showVerify({ delivery, optional: true });
+  if (recoveryCode) return showRecoveryCode(recoveryCode, () => signedIn(user), { intro: codeIntro });
   await loadBooks();
   route();
 }
@@ -73,7 +62,10 @@ function route() {
     if (book) return showReader(book);
     history.replaceState(null, '', '/');
   }
-  const views = { '/': 'home', '/library': 'library', '/settings': 'settings', '/reviews': 'reviews', '/about': 'about' };
+  const sm = location.pathname.match(/^\/store\/([\w-]+)$/);
+  store.key = sm ? sm[1] : null;
+  if (sm) return showShell('store');
+  const views = { '/': 'home', '/library': 'library', '/settings': 'settings', '/reviews': 'reviews', '/about': 'about', '/store': 'store' };
   if (!views[location.pathname]) history.replaceState(null, '', '/');
   showShell(views[location.pathname] || 'home');
 }
@@ -115,10 +107,10 @@ function showAuth() {
     submit.disabled = true;
     try {
       const { email, password, name } = form;
-      const { user, delivery, recoveryKey } = mode === 'login'
+      const { user, recoveryCode } = mode === 'login'
         ? await api.login(email.value.trim(), password.value)
         : await api.register(name.value.trim(), email.value.trim(), password.value);
-      await signedIn(user, { delivery, recoveryKey });
+      await signedIn(user, { recoveryCode });
     } catch (ex) {
       err.textContent = ex.message;
     } finally {
@@ -139,57 +131,39 @@ function authCard(html) {
   return main;
 }
 
-const LOGGED_NOTE = 'This server has no email service set up, so the code was written to the server log instead of being emailed.';
+const LOG_NOTE = 'The code is in this server’s log: on Railway, open your Bindr service, then Deployments → View Logs, and look for “Owner code”.';
 
-/** Asks for a 6-digit code to sign up or to verify an existing account. */
-function showVerify({ delivery = null, optional = false } = {}) {
-  const view = authCard(`<h1>Verify your email</h1>
-    <p class="auth-text">Enter the 6-digit code we sent to <strong>${esc(state.user.email)}</strong>.</p>
-    <p class="auth-note" hidden></p>
-    <form class="auth-form verify-card" novalidate>
-      <label class="field"><span>Code</span>
+/** Owner check for the About page: enter the code written to the server log. */
+function showOwnerCheck() {
+  const view = authCard(`<h1>Confirm you're the owner</h1>
+    <p class="auth-text">To edit the About page, enter the 6-digit owner code we just wrote to the server log.</p>
+    <p class="auth-note">${esc(LOG_NOTE)}</p>
+    <form class="auth-form owner-card" novalidate>
+      <label class="field"><span>Owner code</span>
         <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required placeholder="000000"></label>
       <p class="form-error" role="alert"></p>
-      <button class="btn primary block" type="submit">Verify</button>
-      <button class="auth-link" type="button" data-action="resend">Send a new code</button>
-      <button class="auth-link" type="button" data-action="leave">${optional ? 'Not now' : 'Sign out'}</button>
+      <button class="btn primary block" type="submit">Confirm</button>
+      <button class="auth-link" type="button" data-action="resend">Write a new code</button>
+      <button class="auth-link" type="button" data-action="leave">Cancel</button>
     </form>`);
   const form = view.querySelector('form');
   const err = view.querySelector('.form-error');
-  const note = view.querySelector('.auth-note');
-  const resend = view.querySelector('[data-action="resend"]');
-  const showDelivery = (d) => { note.hidden = d !== 'logged'; note.textContent = LOGGED_NOTE; };
-  let wait = null;
-  const cooldown = (secs) => {
-    clearInterval(wait);
-    let left = secs;
-    const tick = () => {
-      resend.disabled = left > 0;
-      resend.textContent = left > 0 ? `Send a new code (${left}s)` : 'Send a new code';
-      if (left-- <= 0) clearInterval(wait);
-    };
-    tick();
-    wait = setInterval(tick, 1000);
-  };
-  const send = async ({ quiet = false } = {}) => {
+  const write = async ({ quiet = false } = {}) => {
     err.textContent = '';
     try {
-      showDelivery((await api.sendVerification()).delivery);
-      if (!quiet) toast('A new code is on its way.');
-      cooldown(60);
+      await api.ownerCode();
+      if (!quiet) toast('A new code is in the server log.');
     } catch (ex) {
-      const secs = ex.status === 429 && +(ex.message.match(/(\d+) seconds/) || [])[1];
-      if (secs) cooldown(secs);
       if (!(quiet && ex.status === 429)) err.textContent = ex.message;
     }
   };
-  resend.onclick = () => send();
-  view.querySelector('[data-action="leave"]').onclick = async () => {
-    clearInterval(wait);
-    if (!optional) return signOut();
+  const back = async () => {
+    about.loaded = false;
     await loadBooks();
-    route();
+    navigate('/about');
   };
+  view.querySelector('[data-action="resend"]').onclick = () => write();
+  view.querySelector('[data-action="leave"]').onclick = back;
   form.code.oninput = () => {
     form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6);
     if (form.code.value.length === 6) form.requestSubmit();
@@ -201,10 +175,9 @@ function showVerify({ delivery = null, optional = false } = {}) {
     err.textContent = '';
     submit.disabled = true;
     try {
-      const { user } = await api.verifyEmail(form.code.value);
-      clearInterval(wait);
-      toast('Email verified.');
-      await signedIn(user);
+      await api.ownerVerify(form.code.value);
+      toast('Confirmed. You can edit the About page now.');
+      await back();
     } catch (ex) {
       err.textContent = ex.message;
       form.code.select();
@@ -212,76 +185,52 @@ function showVerify({ delivery = null, optional = false } = {}) {
       submit.disabled = false;
     }
   };
-  // A code was just sent by signing up; otherwise send one now.
-  if (delivery) { showDelivery(delivery); cooldown(60); } else send({ quiet: true });
+  write({ quiet: true });
   form.code.focus();
 }
 
-/** Forgot password: with the recovery key, or with a code sent to the email address. */
-function showReset(prefill = '', mode = 'key') {
-  const byKey = mode === 'key';
+/** Forgot password: email + the account's 6-digit recovery code + a new password. */
+function showReset(prefill = '') {
   const view = authCard(`<h1>Reset password</h1>
-    <p class="auth-text">${byKey
-      ? 'Enter your email and the recovery key you saved when you created your account.'
-      : 'We’ll send a code to your email to choose a new password.'}</p>
+    <p class="auth-text">Enter your email and your 6-digit recovery code. You were shown it when you created your account, and it's in Settings → Recovery Code on any device where you're signed in.</p>
     <p class="auth-note" hidden></p>
     <form class="auth-form" novalidate>
       <label class="field"><span>Email</span>
         <input name="email" type="email" autocomplete="email" required placeholder="you@example.com" value="${esc(prefill)}"></label>
-      ${byKey ? `<label class="field"><span>Recovery key</span>
-        <input name="key" class="key-input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX"></label>` : ''}
-      <div class="reset-step2" ${byKey ? '' : 'hidden'}>
-        ${byKey ? '' : `<label class="field"><span>Code</span>
-          <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></label>`}
-        <label class="field"><span>New password</span>
-          <input name="password" type="password" autocomplete="new-password" minlength="8" placeholder="At least 8 characters"></label>
-      </div>
+      <label class="field"><span>Recovery code</span>
+        <input name="code" class="code-input" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="000000"></label>
+      <label class="field"><span>New password</span>
+        <input name="password" type="password" autocomplete="new-password" minlength="8" placeholder="At least 8 characters"></label>
       <p class="form-error" role="alert"></p>
-      <button class="btn primary block" type="submit">${byKey ? 'Reset Password' : 'Email me a code'}</button>
-      <button class="auth-link" type="button" data-action="resend" hidden>Send a new code</button>
-      <button class="auth-link" type="button" data-action="switch">${byKey ? 'Lost your key? Use an email code' : 'Use my recovery key instead'}</button>
+      <button class="btn primary block" type="submit">Reset Password</button>
+      <button class="auth-link" type="button" data-action="owner">Run this server? Use an owner code</button>
       <button class="auth-link" type="button" data-action="back">Back to sign in</button>
     </form>`);
   const form = view.querySelector('form');
   const err = view.querySelector('.form-error');
-  const submit = form.querySelector('[type="submit"]');
-  const text = view.querySelector('.auth-text');
   const note = view.querySelector('.auth-note');
-  const resend = view.querySelector('[data-action="resend"]');
-  let step = 1;
-  const send = async () => {
-    const { delivery } = await api.sendReset(form.email.value.trim());
-    note.hidden = delivery !== 'logged';
-    note.textContent = LOGGED_NOTE;
-    step = 2;
-    form.email.readOnly = true;
-    view.querySelector('.reset-step2').hidden = false;
-    resend.hidden = false;
-    text.innerHTML = `If there's an account for <strong>${esc(form.email.value.trim())}</strong>, we've emailed it a 6-digit code. Enter it with your new password.`;
-    submit.textContent = 'Set New Password';
-    form.code.focus();
-  };
-  resend.onclick = async () => {
+  const submit = form.querySelector('[type="submit"]');
+  view.querySelector('[data-action="owner"]').onclick = async () => {
     err.textContent = '';
-    try { await send(); toast('A new code is on its way.'); } catch (ex) { err.textContent = ex.message; }
+    const email = form.email.value.trim();
+    if (!email) { err.textContent = 'Enter your email first.'; form.email.focus(); return; }
+    try {
+      await api.ownerResetCode(email);
+      note.hidden = false;
+      note.textContent = `If ${email} is the owner's address, an owner code was written to the server log. Enter it as the code above. ${LOG_NOTE}`;
+      form.code.focus();
+    } catch (ex) { err.textContent = ex.message; }
   };
-  view.querySelector('[data-action="switch"]').onclick = () => showReset(form.email.value.trim(), byKey ? 'email' : 'key');
   view.querySelector('[data-action="back"]').onclick = () => showAuth();
-  if (form.code) form.code.oninput = () => { form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6); };
+  form.code.oninput = () => { form.code.value = form.code.value.replace(/\D/g, '').slice(0, 6); };
   form.onsubmit = async (e) => {
     e.preventDefault();
     err.textContent = '';
     submit.disabled = true;
     try {
-      if (!byKey && step === 1) await send();
-      else {
-        const email = form.email.value.trim();
-        const { user, recoveryKey } = byKey
-          ? await api.recover(email, form.key.value, form.password.value)
-          : await api.resetPassword(email, form.code.value, form.password.value);
-        toast('Password changed. Other devices were signed out.');
-        await signedIn(user, { recoveryKey, keyIntro: 'Your old recovery key no longer works. Save this new one in place of it.' });
-      }
+      const { user, recoveryCode } = await api.resetPassword(form.email.value.trim(), form.code.value, form.password.value);
+      toast('Password changed. Other devices were signed out.');
+      await signedIn(user, { recoveryCode, codeIntro: 'Your old recovery code no longer works. This is your new one.' });
     } catch (ex) {
       err.textContent = ex.message;
     } finally {
@@ -291,44 +240,62 @@ function showReset(prefill = '', mode = 'key') {
   form.email.focus();
 }
 
-/** Shows a new recovery key once; the person must confirm they saved it. */
-function showRecoveryKey(key, onDone, { intro } = {}) {
-  const view = authCard(`<h1>Save your recovery key</h1>
-    <p class="auth-text">${esc(intro || 'If you ever forget your password, this key lets you choose a new one.')}
-      Keep it somewhere safe, like a password manager or a note on paper. You won't see it again.</p>
-    <div class="recovery-key" aria-label="Recovery key">${esc(key)}</div>
-    <div class="recovery-actions">
-      <button class="btn" type="button" data-action="copy">Copy</button>
-      <button class="btn" type="button" data-action="download">Download</button>
-    </div>
-    <label class="check-row"><input type="checkbox" name="saved"> I've saved my recovery key</label>
-    <button class="btn primary block" type="button" data-action="done" disabled>Continue</button>`);
-  const done = view.querySelector('[data-action="done"]');
-  view.querySelector('[name="saved"]').onchange = (e) => { done.disabled = !e.target.checked; };
-  view.querySelector('[data-action="copy"]').onclick = async () => {
-    try { await navigator.clipboard.writeText(key); toast('Recovery key copied.'); } catch { toast('Couldn’t copy. Select the key and copy it yourself.'); }
-  };
-  view.querySelector('[data-action="download"]').onclick = () => {
-    const blob = new Blob([`Bindr recovery key for ${state.user?.email || 'your account'}\n\n${key}\n\nUse it under "Forgot password?" on the Bindr sign-in screen.\n`], { type: 'text/plain' });
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'bindr-recovery-key.txt' });
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  };
-  done.onclick = () => onDone();
+const codeHtml = (code) => `<div class="recovery-code" aria-label="Recovery code ${code.split('').join(' ')}">${esc(code.slice(0, 3))}<span></span>${esc(code.slice(3))}</div>`;
+
+async function copyText(text, done = 'Copied.') {
+  try { await navigator.clipboard.writeText(text); toast(done); } catch { toast('Couldn’t copy. Select the text and copy it yourself.'); }
 }
 
-/** Settings: make a new recovery key (needs the password). */
-function createRecoveryKey() {
-  const had = state.user.hasRecoveryKey;
-  formSheet(had ? 'New Recovery Key' : 'Set Up Recovery Key',
-    `<p class="sub">${had ? 'Your current recovery key will stop working. ' : ''}Enter your password to continue.</p>
-     <label class="field"><span>Password</span><input name="pw" type="password" autocomplete="current-password" autofocus required></label>`,
-    'Continue', async (f) => {
-      const { user, recoveryKey } = await api.newRecoveryKey(f.pw.value);
-      state.user = user;
-      localStorage.setItem('bindr:user', JSON.stringify(user));
-      setTimeout(() => showRecoveryKey(recoveryKey, () => route()));
-    });
+/** Shows the account's recovery code after signing up or resetting the password. */
+function showRecoveryCode(code, onDone, { intro } = {}) {
+  const view = authCard(`<h1>Your recovery code</h1>
+    <p class="auth-text">${esc(intro || 'If you ever forget your password, enter this code with your email to choose a new one.')}
+      Write it down or save it somewhere safe. You can see it again any time in Settings → Recovery Code.</p>
+    ${codeHtml(code)}
+    <div class="recovery-actions"><button class="btn" type="button" data-action="copy">Copy Code</button></div>
+    <button class="btn primary block" type="button" data-action="done">Continue</button>`);
+  view.querySelector('[data-action="copy"]').onclick = () => copyText(code, 'Recovery code copied.');
+  view.querySelector('[data-action="done"]').onclick = () => onDone();
+}
+
+/** Settings → Recovery Code: show it, copy it, or get a new one. */
+async function recoveryCodeSheet() {
+  let code;
+  try { ({ recoveryCode: code } = await api.recoveryCode()); } catch (ex) { toast(ex.message); return; }
+  sheet(`<h3>Recovery Code</h3>
+    <p class="sub">If you forget your password, choose “Forgot password?” when signing in and enter this code with your email. Keep it private.</p>
+    ${codeHtml(code)}
+    <form class="new-code" hidden>
+      <label class="field"><span>Password</span><input name="pw" type="password" autocomplete="current-password" required></label>
+      <p class="form-error"></p>
+    </form>
+    <div class="actions">
+      <button type="button" class="btn" data-act="new">Get New Code</button>
+      <button type="button" class="btn primary" data-act="copy">Copy</button>
+    </div>`, (el, close) => {
+    const form = el.querySelector('.new-code');
+    const newBtn = el.querySelector('[data-act="new"]');
+    el.querySelector('[data-act="copy"]').onclick = () => copyText(code, 'Recovery code copied.');
+    const submitNew = async () => {
+      try {
+        ({ recoveryCode: code } = await api.newRecoveryCode(form.pw.value));
+        el.querySelector('.recovery-code').outerHTML = codeHtml(code);
+        form.hidden = true;
+        form.pw.value = '';
+        newBtn.textContent = 'Get New Code';
+        toast('New recovery code made. The old one no longer works.');
+      } catch (ex) { el.querySelector('.form-error').textContent = ex.message; }
+    };
+    form.onsubmit = (e) => { e.preventDefault(); submitNew(); };
+    newBtn.onclick = () => {
+      if (form.hidden) {
+        form.hidden = false;
+        newBtn.textContent = 'Confirm New Code';
+        el.querySelector('.form-error').textContent = 'Enter your password. Your current code will stop working.';
+        form.pw.focus();
+      } else submitNew();
+    };
+  });
 }
 
 async function signOut() {
@@ -438,7 +405,7 @@ const ICONS = {
   book: '<svg class="empty-icon" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5zM12 6.5v13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/></svg>',
 };
 
-const VIEW_TITLES = { home: 'Home', library: 'Library', settings: 'Settings', reviews: 'Ratings & Reviews', about: 'About' };
+const VIEW_TITLES = { home: 'Home', library: 'Library', settings: 'Settings', reviews: 'Ratings & Reviews', about: 'About', store: 'Book Store' };
 
 function showShell(view) {
   closeReader();
@@ -457,6 +424,7 @@ function showShell(view) {
   });
   document.title = `${VIEW_TITLES[view]} · Bindr`;
   if (view === 'about' && changed && !about.editing) about.loaded = false;
+  if (view === 'store') loadStore();
   renderShelf();
   updateCurrentNav();
   if (changed) window.scrollTo(0, 0);
@@ -572,6 +540,7 @@ async function moreMenu() {
   const choice = await menu('', [
     { label: 'Sync Your Library', value: 'sync' },
     { label: 'Add Books', value: 'upload' },
+    { label: 'Book Store', value: 'store' },
     { label: 'Ratings & Reviews', value: 'reviews' },
     { label: 'Settings', value: 'settings' },
     { label: 'Help', value: 'help' },
@@ -579,6 +548,7 @@ async function moreMenu() {
   ]);
   if (choice === 'sync') syncLibrary();
   if (choice === 'upload') shell.querySelector('.file-input').click();
+  if (choice === 'store') navigate('/store');
   if (choice === 'reviews') navigate('/reviews');
   if (choice === 'settings') navigate('/settings');
   if (choice === 'help') helpSheet();
@@ -594,6 +564,8 @@ function helpSheet() {
        <li><b>Dictionary:</b> double-tap a word.</li>
        <li><b>Chapters:</b> ⋮ → Chapters while reading. Add your own if the book has none. Tap the page count at the bottom right to switch between chapter and book.</li>
        <li><b>Rate a book:</b> double-tap or press and hold its cover.</li>
+       <li><b>Book Store:</b> ⋮ → Book Store shows books people rated and shared, with their reviews. Tap <b>Copy</b> to get “Title by Author” and find the book wherever you buy or borrow books.</li>
+       <li><b>Forgot your password?</b> Use your 6-digit recovery code, from Settings → Recovery Code.</li>
        <li><b>More options:</b> the <b>⋮</b> next to a book.</li>
        <li><b>Turn pages:</b> swipe, tap the edges, or use the arrow keys.</li>
        <li><b>Zoom:</b> double-tap empty space on a page.</li>
@@ -603,6 +575,156 @@ function helpSheet() {
      <div class="actions"><button class="btn primary" data-ok>Done</button></div>`,
     (el, close) => { el.querySelector('[data-ok]').onclick = () => close(); },
   );
+}
+
+// ------------------------------------------------------------------ book store
+// Reviews people shared, one entry per book. Only the title, author(s), cover and reviews
+// are shown: books themselves are never shared. "Copy" gives "Title by Author" so people
+// can find the book wherever they buy or borrow books.
+const store = { key: null, items: null, detail: null, loading: false, error: null, sort: 'recent', q: '' };
+
+async function loadStore() {
+  const key = store.key;
+  if (store.loading === (key || 'list')) return;
+  store.loading = key || 'list';
+  store.error = null;
+  try {
+    if (key) {
+      if (store.detail?.item.key !== key) store.detail = null;
+      store.detail = await api.storeItem(key);
+    } else {
+      store.items = (await api.store()).items;
+    }
+  } catch (e) {
+    store.error = e.offline ? 'The Book Store needs an internet connection.' : e.message;
+  } finally {
+    store.loading = false;
+  }
+  if (state.view === 'store' && store.key === key) renderShelf();
+}
+
+const findText = (it) => (it.author ? `${it.title} by ${it.author}` : it.title);
+
+function storeCover(it) {
+  const img = it.coverId ? `<img src="${api.storeCoverUrl(it.coverId)}" alt="" loading="lazy" onerror="this.remove()">` : '';
+  return `<div class="cover"><div class="placeholder">${esc(it.title)}</div>${img}</div>`;
+}
+
+const STORE_SORTS = [['recent', 'Recently Reviewed'], ['top', 'Top Rated'], ['most', 'Most Reviewed'], ['title', 'Title']];
+
+function storeListHtml() {
+  const head = `<h1 class="k-page-title">Book Store</h1>
+    <p class="store-intro">Books people on Bindr have rated, with their reviews. Bindr doesn't sell or share books: copy a title to find it at your favorite store or library.</p>`;
+  if (!store.items) {
+    return `${head}${store.error ? `<div class="empty"><h2>Couldn't load the Book Store</h2><p>${esc(store.error)}</p></div>` : '<div class="empty"><p>Loading…</p></div>'}`;
+  }
+  const q = store.q.trim().toLowerCase();
+  const sorters = {
+    recent: (a, b) => b.lastReviewedAt - a.lastReviewedAt,
+    top: (a, b) => b.rating - a.rating || b.reviewCount - a.reviewCount,
+    most: (a, b) => b.reviewCount - a.reviewCount || b.rating - a.rating,
+    title: (a, b) => a.title.localeCompare(b.title),
+  };
+  const items = store.items
+    .filter((it) => !q || it.title.toLowerCase().includes(q) || it.author.toLowerCase().includes(q))
+    .sort(sorters[store.sort] || sorters.recent);
+  const body = !store.items.length
+    ? `<div class="empty">${ICONS.book}<h2>No reviews yet</h2><p>Rate a book in your library and choose “Share in the Book Store” to be the first.</p></div>`
+    : items.length
+      ? `<div class="grid">${items.map((it) => `
+        <div class="book store-card">
+          <button class="book-open" data-go="/store/${esc(it.key)}" aria-label="${esc(findText(it))}">${storeCover(it)}</button>
+          <div class="book-info"><div class="book-text">
+            <div class="book-title">${esc(it.title)}</div>
+            ${it.author ? `<div class="book-sub">${esc(it.author)}</div>` : ''}
+            <div class="book-meta">${starsHtml(it.rating, 12)}<span>${fmtRating(it.rating)} (${it.reviewCount})</span></div>
+          </div></div>
+        </div>`).join('')}</div>`
+      : '<div class="empty"><h2>No matches</h2><p>Try a different title or author.</p></div>';
+  return `${head}
+    <div class="k-libbar">
+      <label class="store-search"><input type="search" data-store-q placeholder="Search the Book Store" value="${esc(store.q)}" aria-label="Search the Book Store"></label>
+      <select class="k-select" data-store-sort aria-label="Sort">
+        ${STORE_SORTS.map(([v, l]) => `<option value="${v}" ${store.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    ${body}`;
+}
+
+function storeDetailHtml() {
+  const d = store.detail;
+  const back = '<button class="k-back" data-go="/store">‹ Book Store</button>';
+  if (!d) {
+    return `${back}${store.error ? `<div class="empty"><h2>Not found</h2><p>${esc(store.error)}</p></div>` : '<div class="empty"><p>Loading…</p></div>'}`;
+  }
+  const it = d.item;
+  const date = (t) => new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return `${back}
+    <section class="store-hero">
+      ${storeCover(it)}
+      <div class="store-hero-meta">
+        <h1>${esc(it.title)}</h1>
+        ${it.author ? `<div class="store-author">${esc(it.author)}</div>` : ''}
+        <div class="book-meta store-rating">${starsHtml(it.rating, 18)}<span>${fmtRating(it.rating)} · ${it.reviewCount} review${it.reviewCount === 1 ? '' : 's'}</span></div>
+        <div class="store-find">
+          <div class="store-find-text">${esc(findText(it))}</div>
+          <button class="btn primary" data-store="copy">Copy</button>
+        </div>
+        <p class="store-hint">Paste it into Amazon, Libby, your library's app or any bookstore to find this book.</p>
+      </div>
+    </section>
+    <h2 class="store-reviews-title">Reviews</h2>
+    <div class="store-reviews">${d.reviews.map((r) => `
+      <article class="store-review">
+        <div class="store-review-head">
+          <span class="store-reviewer">${esc(r.name)}${r.mine ? ' <small>(you)</small>' : ''}</span>
+          <span class="store-date">${esc(date(r.reviewedAt))}</span>
+        </div>
+        <div class="book-meta">${starsHtml(r.rating, 14)}<span>${fmtRating(r.rating)}</span></div>
+        ${r.title ? `<div class="r-title">${esc(r.title)}</div>` : ''}
+        ${r.body ? `<p>${esc(r.body).replace(/\n/g, '<br>')}</p>` : ''}
+        ${r.mine || r.canRemove ? `<div class="store-review-actions">
+          ${r.mine ? `<button class="btn" data-edit-review="${esc(r.id)}">Edit Your Review</button>` : ''}
+          ${r.canRemove && !r.mine ? `<button class="btn ghost danger-text" data-remove-review="${esc(r.id)}">Remove from Book Store</button>` : ''}
+        </div>` : ''}
+      </article>`).join('')}</div>`;
+}
+
+const storeHtml = () => (store.key ? storeDetailHtml() : storeListHtml());
+
+function bindStore(main) {
+  const qInput = main.querySelector('[data-store-q]');
+  if (qInput) {
+    qInput.oninput = () => {
+      store.q = qInput.value;
+      const pos = qInput.selectionStart;
+      renderShelf();
+      const again = shell.querySelector('[data-store-q]');
+      again.focus();
+      again.setSelectionRange(pos, pos);
+    };
+  }
+  const sort = main.querySelector('[data-store-sort]');
+  if (sort) sort.onchange = () => { store.sort = sort.value; renderShelf(); };
+  main.querySelector('[data-store="copy"]')?.addEventListener('click', () => {
+    const text = findText(store.detail.item);
+    copyText(text, `Copied “${text}”`);
+  });
+  main.querySelectorAll('[data-edit-review]').forEach((b) => (b.onclick = async () => {
+    const book = state.books.find((x) => x.id === b.dataset.editReview);
+    if (!book) return toast('That book is no longer in your library.');
+    const updated = await reviewSheet(book);
+    if (updated) { replaceBook(updated); loadStore(); }
+  }));
+  main.querySelectorAll('[data-remove-review]').forEach((b) => (b.onclick = async () => {
+    if (!(await confirmSheet('Remove this review from the Book Store?', 'It stays in the reviewer’s own library, but no one else will see it.', 'Remove'))) return;
+    try {
+      await api.removeStoreReview(b.dataset.removeReview);
+      toast('Review removed from the Book Store.');
+      store.items = null;
+      if (store.detail.reviews.length <= 1) navigate('/store'); else loadStore();
+    } catch (ex) { toast(ex.message); }
+  }));
 }
 
 // ------------------------------------------------------------------ about page
@@ -617,7 +739,7 @@ async function loadAbout() {
     localStorage.setItem('bindr:about', JSON.stringify({ content: about.content, updatedAt: about.updatedAt }));
   } catch (e) {
     const cached = JSON.parse(localStorage.getItem('bindr:about') || 'null');
-    if (cached) Object.assign(about, cached, { loaded: true, canEdit: false, verifyToEdit: false });
+    if (cached) Object.assign(about, cached, { loaded: true, canEdit: false, ownerCheck: false });
     about.error = e.offline ? 'You’re offline. Showing the last version you saw.' : e.message;
   } finally {
     about.loading = false;
@@ -669,7 +791,7 @@ function aboutHtml() {
   return `<div class="about-head">
       <h1 class="k-page-title">About</h1>
       ${about.canEdit ? '<button class="btn" data-about="edit">Edit</button>' : ''}
-      ${about.verifyToEdit ? '<button class="btn" data-about="verify">Verify Email to Edit</button>' : ''}
+      ${about.ownerCheck ? '<button class="btn" data-about="owner">Confirm Owner to Edit</button>' : ''}
     </div>
     ${about.error ? `<p class="book-sub" style="margin:0 0 10px">${esc(about.error)}</p>` : ''}
     <article class="md-body about-body">${renderMarkdown(about.content || ABOUT_PLACEHOLDER)}</article>
@@ -677,10 +799,7 @@ function aboutHtml() {
 }
 
 function bindAbout(main) {
-  main.querySelector('[data-about="verify"]')?.addEventListener('click', () => {
-    about.loaded = false;
-    showVerify({ optional: true });
-  });
+  main.querySelector('[data-about="owner"]')?.addEventListener('click', showOwnerCheck);
   main.querySelector('[data-about="edit"]')?.addEventListener('click', () => {
     Object.assign(about, { editing: true, draft: about.content, tab: 'write' });
     renderShelf();
@@ -817,29 +936,13 @@ function renderShelf() {
   else if (state.view === 'settings') main.innerHTML = settingsHtml();
   else if (state.view === 'reviews') main.innerHTML = reviewsHtml();
   else if (state.view === 'about') main.innerHTML = aboutHtml();
-  else main.innerHTML = recoveryNotice() + homeHtml();
+  else if (state.view === 'store') main.innerHTML = storeHtml();
+  else main.innerHTML = homeHtml();
   bindCards(main);
-  main.querySelector('[data-notice="recovery"]')?.addEventListener('click', createRecoveryKey);
-  main.querySelector('[data-notice="dismiss"]')?.addEventListener('click', () => {
-    try { localStorage.setItem('bindr:recovery-dismissed', state.user.id); } catch {}
-    renderShelf();
-  });
   if (state.view === 'library' && !state.query.trim()) bindLibraryBar(main);
   if (state.view === 'settings' && !state.query.trim()) bindSettings(main);
   if (state.view === 'about' && !state.query.trim()) bindAbout(main);
-}
-
-/** Home: nudge accounts made before recovery keys existed to set one up. */
-function recoveryNotice() {
-  if (!state.user || state.user.hasRecoveryKey || state.user.hasRecoveryKey === undefined) return '';
-  try { if (localStorage.getItem('bindr:recovery-dismissed') === state.user.id) return ''; } catch {}
-  return `<section class="k-notice">
-    <div><strong>Set up a recovery key</strong><p>It lets you get back into your account if you forget your password.</p></div>
-    <div class="k-notice-actions">
-      <button class="btn" data-notice="dismiss">Not now</button>
-      <button class="btn primary" data-notice="recovery">Set Up</button>
-    </div>
-  </section>`;
+  if (state.view === 'store' && !state.query.trim()) bindStore(main);
 }
 
 function shelfRow(title, books, { link } = {}) {
@@ -975,10 +1078,9 @@ function settingsHtml() {
     <div class="k-group-title">Your Account</div>
     <div class="k-rows">
       ${row('name', 'Name', u.name)}
-      ${u.verified ? info('Email', u.email) : row('verify', 'Email', `${u.email} · Not verified`)}
-      ${u.verified ? info('Email Status', 'Verified ✓') : ''}
+      ${info('Email', u.email)}
       ${row('password', 'Change Password')}
-      ${row('recovery', 'Recovery Key', u.hasRecoveryKey ? 'Set up' : 'Not set up')}
+      ${row('recovery', 'Recovery Code')}
       ${row('logout', 'Sign Out')}
     </div>
     <div class="k-group-title">Display</div>
@@ -1006,8 +1108,7 @@ function bindSettings(main) {
     const a = b.dataset.set;
     if (a === 'name') changeName();
     if (a === 'password') changePassword();
-    if (a === 'verify') showVerify({ optional: true });
-    if (a === 'recovery') createRecoveryKey();
+    if (a === 'recovery') recoveryCodeSheet();
     if (a === 'logout') signOut();
     if (a === 'delete') deleteAccount();
     if (a === 'sync') syncLibrary();

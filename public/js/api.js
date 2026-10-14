@@ -1,9 +1,5 @@
 // Thin wrapper around the Bindr REST API.
 
-let needsVerificationHandler = null;
-/** Called when the server says the account must verify its email first. */
-export function onNeedsVerification(fn) { needsVerificationHandler = fn; }
-
 async function request(method, url, body) {
   const opts = { method, credentials: 'same-origin', headers: {} };
   if (body !== undefined) {
@@ -22,10 +18,6 @@ async function request(method, url, body) {
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
-    if (data.needsVerification) {
-      err.needsVerification = true;
-      needsVerificationHandler?.();
-    }
     throw err;
   }
   return data;
@@ -36,12 +28,16 @@ export const api = {
   login: (email, password) => request('POST', '/api/auth/login', { email, password }),
   register: (name, email, password) => request('POST', '/api/auth/register', { name, email, password }),
   logout: () => request('POST', '/api/auth/logout'),
-  sendVerification: () => request('POST', '/api/auth/verify/send'),
-  verifyEmail: (code) => request('POST', '/api/auth/verify', { code }),
-  sendReset: (email) => request('POST', '/api/auth/reset/send', { email }),
   resetPassword: (email, code, password) => request('POST', '/api/auth/reset', { email, code, password }),
-  recover: (email, key, password) => request('POST', '/api/auth/recover', { email, key, password }),
-  newRecoveryKey: (password) => request('POST', '/api/me/recovery-key', { password }),
+  ownerResetCode: (email) => request('POST', '/api/auth/owner-code', { email }),
+  recoveryCode: () => request('GET', '/api/me/recovery-code'),
+  newRecoveryCode: (password) => request('POST', '/api/me/recovery-code', { password }),
+  ownerCode: () => request('POST', '/api/owner/code'),
+  ownerVerify: (code) => request('POST', '/api/owner/verify', { code }),
+  store: () => request('GET', '/api/store'),
+  storeItem: (key) => request('GET', `/api/store/${encodeURIComponent(key)}`),
+  storeCoverUrl: (id) => `/api/store/cover/${encodeURIComponent(id)}`,
+  removeStoreReview: (id) => request('DELETE', `/api/store/review/${encodeURIComponent(id)}`),
   updateMe: (fields) => request('PATCH', '/api/me', fields),
   deleteAccount: (password) => request('DELETE', '/api/me', { password }),
   books: () => request('GET', '/api/books'),

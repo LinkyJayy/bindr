@@ -115,20 +115,13 @@ button { cursor: pointer; }
 .code-input { font-size: 28px !important; letter-spacing: .4em; text-align: center; font-family: ui-monospace, Menlo, monospace; }
 .k-val .ok { font-weight: 700; }
 .key-input { font-family: ui-monospace, Menlo, monospace; text-transform: uppercase; letter-spacing: .06em; }
-.recovery-key {
-  margin: 0 0 14px; padding: 16px 10px; border: 2px solid var(--ink); border-radius: 10px;
-  font: 700 20px/1.3 ui-monospace, Menlo, monospace; letter-spacing: .06em; overflow-wrap: anywhere; user-select: all;
+.recovery-code {
+  display: flex; justify-content: center; align-items: center; gap: 14px; margin: 4px 0 16px; padding: 14px 10px;
+  border: 2px solid var(--ink); border-radius: 10px; font: 700 40px/1 ui-monospace, Menlo, monospace; letter-spacing: .16em; user-select: all;
 }
+.recovery-code span { width: 10px; height: 3px; background: currentColor; opacity: .4; }
 .recovery-actions { display: flex; gap: 10px; justify-content: center; margin: 0 0 18px; }
 .recovery-actions .btn { flex: 1; }
-.check-row { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 16px; font-weight: 600; }
-.check-row input { width: 20px; height: 20px; accent-color: var(--ink); }
-.k-notice {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
-  margin: 16px 0 4px; padding: 14px 16px; border: 1.5px solid var(--strong-line); border-radius: 10px;
-}
-.k-notice p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
-.k-notice-actions { display: flex; gap: 8px; }
 
 /* ---------- shell: top bar ---------- */
 .shell { min-height: 100dvh; padding-bottom: calc(var(--nav-h) + var(--safe-bottom)); }
@@ -628,3 +621,44 @@ html.cm .eraser-bar { filter: url(#bindr-cm); }
 .hint-md { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
 .hint-md code { font-size: 11px; }
 .about-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
+
+/* ---------- Book Store ---------- */
+.store-intro { margin: -4px 0 14px; color: var(--muted); max-width: 640px; font-size: 15px; line-height: 1.45; }
+.store-search { flex: 1 1 220px; display: flex; }
+.store-search input {
+  flex: 1; min-width: 0; height: 36px; border: 1.5px solid var(--line); border-radius: 8px; padding: 0 12px;
+  background: var(--surface); color: var(--text); font-size: 15px;
+}
+.k-back { border: 0; background: none; padding: 6px 0; margin: 2px 0 10px; font-size: 15px; font-weight: 700; color: var(--text); }
+.store-hero { display: flex; gap: 22px; align-items: flex-start; margin-bottom: 26px; }
+.store-hero .cover { width: 150px; flex: none; }
+.store-hero-meta { flex: 1; min-width: 0; }
+.store-hero h1 { margin: 0 0 4px; font-size: 26px; line-height: 1.2; overflow-wrap: anywhere; }
+.store-author { color: var(--muted); font-size: 17px; margin-bottom: 8px; }
+.store-rating { font-size: 15px; margin-bottom: 16px; }
+.store-find {
+  display: flex; align-items: center; gap: 10px; border: 1.5px solid var(--strong-line); border-radius: 10px; padding: 8px 8px 8px 14px; max-width: 560px;
+}
+.store-find-text { flex: 1; min-width: 0; font-weight: 700; overflow-wrap: anywhere; user-select: all; }
+.store-find .btn { flex: none; padding: 8px 18px; }
+.store-hint { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.store-reviews-title { font-size: 20px; margin: 0 0 4px; }
+.store-review { padding: 14px 0; border-bottom: 1px solid var(--line); max-width: 760px; }
+.store-review-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.store-reviewer { font-weight: 800; }
+.store-reviewer small { color: var(--muted); font-weight: 600; }
+.store-date { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.store-review .r-title { font-weight: 800; margin-top: 6px; }
+.store-review p { margin: 4px 0 0; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.store-review-actions { display: flex; gap: 8px; margin-top: 10px; }
+.store-review-actions .btn { padding: 6px 14px; font-size: 14px; }
+@media (max-width: 520px) {
+  .store-hero { flex-direction: column; align-items: center; text-align: center; }
+  .store-hero .cover { width: 140px; }
+  .store-hero .book-meta { justify-content: center; }
+  .store-find { text-align: left; }
+}
+.share-row { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0 8px; text-align: left; cursor: pointer; }
+.share-row input { width: 20px; height: 20px; margin-top: 1px; flex: none; accent-color: var(--ink); }
+.share-row b { display: block; font-size: 15px; }
+.share-row small { display: block; color: var(--muted); font-size: 13px; line-height: 1.35; margin-top: 2px; }

@@ -8,7 +8,6 @@ const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
-const { sendMail, codeEmail, emailProvider } = require('./mailer');
 
 // ---------------------------------------------------------------------------
 // Storage: everything persistent (SQLite DB + uploaded PDFs + covers) lives in
@@ -29,11 +28,9 @@ const DICTIONARY_URL = process.env.DICTIONARY_URL || 'https://api.dictionaryapi.
 const ADMIN_EMAILS = new Set((process.env.ADMIN_EMAILS || 'ljmiller2389@gmail.com')
   .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
 const isAdminEmail = (email) => ADMIN_EMAILS.has(String(email).toLowerCase());
-// Admin rights need a verified email, so nobody can claim them by signing up with the address.
+// Admin rights also need the owner check (a code from the server log), so nobody can
+// claim them just by signing up with the address. `email_verified` records that check.
 const isAdmin = (user) => !!user && !!user.email_verified && isAdminEmail(user.email);
-// When an email service is set up, every account must verify its email before using Bindr.
-const REQUIRE_VERIFY = !!emailProvider && !/^(0|false|no|off)$/i.test(process.env.REQUIRE_EMAIL_VERIFICATION || '');
-const CODE_MINUTES = 15;
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 300;
 const SESSION_DAYS = 60;
 const COOKIE = 'bindr_session';
@@ -87,12 +84,17 @@ db.exec(`
   add('format', "TEXT NOT NULL DEFAULT 'pdf'");       // 'pdf' | 'epub'
   add('location', 'INTEGER');                          // ePUB reading position (character offset)
   add('chapters', 'TEXT');                             // chapters the reader added: JSON [{title, page, loc}]
+  add('review_public', 'INTEGER NOT NULL DEFAULT 0');  // 1 = the review is shared in the Book Store
 }
 {
   const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!cols.includes('email_verified')) db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
-  if (!cols.includes('recovery_hash')) db.exec('ALTER TABLE users ADD COLUMN recovery_hash TEXT'); // sha256 of the recovery key
+  if (cols.includes('recovery_hash')) db.exec('ALTER TABLE users DROP COLUMN recovery_hash'); // old recovery keys
+  if (!cols.includes('recovery_code')) db.exec('ALTER TABLE users ADD COLUMN recovery_code TEXT'); // 6-digit recovery code
+  if (!cols.includes('recovery_fails')) db.exec('ALTER TABLE users ADD COLUMN recovery_fails INTEGER NOT NULL DEFAULT 0');
+  if (!cols.includes('recovery_locked_until')) db.exec('ALTER TABLE users ADD COLUMN recovery_locked_until INTEGER');
 }
+db.exec('DROP TABLE IF EXISTS email_codes');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS highlights (
@@ -115,16 +117,12 @@ db.exec(`
     updated_at INTEGER NOT NULL,
     updated_by TEXT
   );
-  CREATE TABLE IF NOT EXISTS email_codes (
-    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    purpose      TEXT NOT NULL,      -- 'verify' | 'reset'
-    code_hash    TEXT NOT NULL,
-    expires_at   INTEGER NOT NULL,
-    attempts     INTEGER NOT NULL DEFAULT 0,
-    sent_at      INTEGER NOT NULL,
-    window_start INTEGER NOT NULL,   -- start of the hour the send count covers
-    sends        INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (user_id, purpose)
+  CREATE TABLE IF NOT EXISTS owner_codes (
+    user_id    TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash  TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    sent_at    INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS definitions (
     word       TEXT PRIMARY KEY,
@@ -143,19 +141,19 @@ fs.rm(path.join(DATA_DIR, 'store'), { recursive: true, force: true }, () => {});
 
 const q = {
   userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
-  userById: db.prepare('SELECT id, email, name, created_at, email_verified, recovery_hash IS NOT NULL AS has_recovery FROM users WHERE id = ?'),
+  userById: db.prepare('SELECT id, email, name, created_at, email_verified FROM users WHERE id = ?'),
   insertUser: db.prepare('INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)'),
   updateUserName: db.prepare('UPDATE users SET name = ? WHERE id = ?'),
   updateUserPassword: db.prepare('UPDATE users SET password_hash = ? WHERE id = ?'),
   insertSession: db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)'),
   sessionUser: db.prepare(`
-    SELECT u.id, u.email, u.name, u.created_at, u.email_verified, u.recovery_hash IS NOT NULL AS has_recovery FROM sessions s JOIN users u ON u.id = s.user_id
+    SELECT u.id, u.email, u.name, u.created_at, u.email_verified FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`),
   deleteSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
   deleteUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?'),
   deleteAllUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ?'),
   setVerified: db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?'),
-  setRecovery: db.prepare('UPDATE users SET recovery_hash = ? WHERE id = ?'),
+  setRecovery: db.prepare('UPDATE users SET recovery_code = ?, recovery_fails = 0, recovery_locked_until = NULL WHERE id = ?'),
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
   listBooks: db.prepare(`SELECT * FROM books WHERE user_id = ?
     ORDER BY COALESCE(last_opened_at, created_at) DESC`),
@@ -187,6 +185,7 @@ function publicBook(b) {
     rating: b.rating ?? null,
     reviewTitle: b.review_title || '',
     reviewBody: b.review_body || '',
+    reviewPublic: !!b.review_public,
     pageTheme: b.page_theme === 'dark' ? 'dark' : 'light',
     format: b.format === 'epub' ? 'epub' : 'pdf',
     location: b.location ?? null,
@@ -246,110 +245,82 @@ function startSession(res, userId) {
 
 // What the app sees of an account.
 function userJson(u) {
-  return {
-    id: u.id, email: u.email, name: u.name, created_at: u.created_at,
-    verified: !!u.email_verified,
-    hasRecoveryKey: !!u.has_recovery,
-    mustVerify: REQUIRE_VERIFY && !u.email_verified,
-  };
+  return { id: u.id, email: u.email, name: u.name, created_at: u.created_at };
 }
 
-// `auth` needs a verified email (when verification is required); `authAny` only a session,
-// for the routes an unverified account still needs (verifying, its own profile, deleting it).
-function makeAuth(needVerified) {
-  return (req, res, next) => {
-    const token = req.cookies[COOKIE];
-    const user = token && q.sessionUser.get(sha256(token), Date.now());
-    if (!user) return res.status(401).json({ error: 'Not signed in' });
-    if (needVerified && REQUIRE_VERIFY && !user.email_verified) {
-      return res.status(403).json({ error: 'Verify your email address to continue.', needsVerification: true });
-    }
-    req.user = user;
-    req.tokenHash = sha256(token);
-    next();
-  };
+function auth(req, res, next) {
+  const token = req.cookies[COOKIE];
+  const user = token && q.sessionUser.get(sha256(token), Date.now());
+  if (!user) return res.status(401).json({ error: 'Not signed in' });
+  req.user = user;
+  req.tokenHash = sha256(token);
+  next();
 }
-const auth = makeAuth(true);
-const authAny = makeAuth(false);
 
 setInterval(() => {
   q.purgeSessions.run(Date.now());
-  db.prepare('DELETE FROM email_codes WHERE expires_at <= ? AND window_start <= ?').run(Date.now(), Date.now() - 3600e3);
+  db.prepare('DELETE FROM owner_codes WHERE expires_at <= ?').run(Date.now());
 }, 6 * 3600e3).unref();
 
-// --- one-time email codes ----------------------------------------------------
 const httpError = (status, message) => Object.assign(new Error(message), { status });
-const codeHash = (userId, purpose, code) => sha256(`${purpose}:${userId}:${code}`);
-
-/** Emails a fresh 6-digit code. At most one a minute and six an hour per account and purpose. */
-async function issueCode(user, purpose) {
-  const now = Date.now();
-  const prev = db.prepare('SELECT * FROM email_codes WHERE user_id = ? AND purpose = ?').get(user.id, purpose);
-  if (prev && now - prev.sent_at < 60e3) {
-    throw httpError(429, `Please wait ${Math.ceil((60e3 - (now - prev.sent_at)) / 1000)} seconds before asking for another code.`);
-  }
-  const sameHour = prev && now - prev.window_start < 3600e3;
-  if (sameHour && prev.sends >= 6) throw httpError(429, 'Too many codes sent. Try again in an hour.');
-  const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
-  db.prepare(`INSERT INTO email_codes (user_id, purpose, code_hash, expires_at, attempts, sent_at, window_start, sends)
-    VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-    ON CONFLICT (user_id, purpose) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at,
-      attempts = 0, sent_at = excluded.sent_at, window_start = excluded.window_start, sends = excluded.sends`)
-    .run(user.id, purpose, codeHash(user.id, purpose, code), now + CODE_MINUTES * 60e3, now,
-      sameHour ? prev.window_start : now, sameHour ? prev.sends + 1 : 1);
-  const intro = purpose === 'verify'
-    ? 'Enter this code in Bindr to verify your email address.'
-    : 'Enter this code in Bindr to choose a new password.';
-  try {
-    return await sendMail({
-      to: user.email,
-      subject: purpose === 'verify' ? `Your Bindr verification code: ${code}` : `Your Bindr password reset code: ${code}`,
-      ...codeEmail({ intro, code, minutes: CODE_MINUTES }),
-    });
-  } catch (err) {
-    console.error(`[email] Sending to ${user.email} failed:`, err.message);
-    db.prepare('UPDATE email_codes SET sent_at = 0, expires_at = 0 WHERE user_id = ? AND purpose = ?').run(user.id, purpose);
-    throw httpError(502, 'The email couldn\'t be sent. Try again in a few minutes.');
-  }
-}
-
-/** Checks a code; a correct one is used up. Five wrong tries and the code stops working. */
-function useCode(user, purpose, input) {
-  const code = String(input ?? '').replace(/\D/g, '');
-  const row = db.prepare('SELECT * FROM email_codes WHERE user_id = ? AND purpose = ?').get(user.id, purpose);
-  if (!row || row.expires_at <= Date.now()) throw httpError(400, 'That code has expired. Ask for a new one.');
-  if (row.attempts >= 5) throw httpError(400, 'Too many wrong codes. Ask for a new one.');
-  const ok = code.length === 6 && crypto.timingSafeEqual(Buffer.from(codeHash(user.id, purpose, code)), Buffer.from(row.code_hash));
-  if (!ok) {
-    db.prepare('UPDATE email_codes SET attempts = attempts + 1 WHERE user_id = ? AND purpose = ?').run(user.id, purpose);
-    throw httpError(400, 'That code isn\'t right. Check the email and try again.');
-  }
-  db.prepare('UPDATE email_codes SET expires_at = 0 WHERE user_id = ? AND purpose = ?').run(user.id, purpose);
-}
-
-// --- recovery keys ---------------------------------------------------------------
-// A recovery key resets a forgotten password without email. It's shown once, only its
-// hash is stored, and each use (or new key) replaces the old one.
-const KEY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O, U
-const normalizeKey = (k) => String(k ?? '').toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1').replace(/[^0-9A-Z]/g, '');
-
-/** Makes a new 100-bit key for the account and returns it, e.g. 7KQ2M-X9D4T-…. */
-function newRecoveryKey(userId) {
-  const chars = [...crypto.randomBytes(20)].map((b) => KEY_ALPHABET[b & 31]).join('');
-  q.setRecovery.run(sha256(`recovery:${chars}`), userId);
-  return chars.match(/.{5}/g).join('-');
-}
-
-function recoveryKeyMatches(user, input) {
-  const key = normalizeKey(input);
-  if (!user?.recovery_hash || key.length !== 20) return false;
-  return crypto.timingSafeEqual(Buffer.from(sha256(`recovery:${key}`)), Buffer.from(user.recovery_hash));
-}
-
 const sendError = (res, err) => {
   if (!err.status) throw err;
   res.status(err.status).json({ error: err.message });
 };
+const newSixDigits = () => String(crypto.randomInt(0, 1e6)).padStart(6, '0');
+const digitsOf = (v) => String(v ?? '').replace(/\D/g, '');
+const sameCode = (a, b) => a.length === 6 && b.length === 6 && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+// --- recovery codes --------------------------------------------------------------
+// Every account has a 6-digit recovery code, shown when it's created and any time in
+// Settings. With the account's email it sets a new password. Five wrong tries lock it
+// for an hour, so it can't be guessed; each use replaces it with a new one.
+const RECOVERY_TRIES = 5;
+const RECOVERY_LOCK_MS = 3600e3;
+
+function newRecoveryCode(userId) {
+  const code = newSixDigits();
+  q.setRecovery.run(code, userId);
+  return code;
+}
+
+/** The account's recovery code, making one for accounts created before codes existed. */
+function recoveryCodeOf(user) {
+  const row = db.prepare('SELECT recovery_code FROM users WHERE id = ?').get(user.id);
+  return row?.recovery_code || newRecoveryCode(user.id);
+}
+
+// --- owner check ---------------------------------------------------------------------
+// Editing the About page needs the account to be one of ADMIN_EMAILS *and* to have proven
+// it belongs to whoever runs the server: a 6-digit code written only to the server log
+// (Railway → Deployments → Logs). Anyone can sign up with an email address, but only the
+// owner can read the log. The same code also lets the owner take back their address if
+// someone else signed up with it.
+const OWNER_CODE_MINUTES = 15;
+
+function writeOwnerCode(user) {
+  const now = Date.now();
+  const prev = db.prepare('SELECT sent_at FROM owner_codes WHERE user_id = ?').get(user.id);
+  if (prev && now - prev.sent_at < 30e3) {
+    throw httpError(429, `Please wait ${Math.ceil((30e3 - (now - prev.sent_at)) / 1000)} seconds before asking for another code.`);
+  }
+  const code = newSixDigits();
+  db.prepare(`INSERT INTO owner_codes (user_id, code_hash, expires_at, attempts, sent_at) VALUES (?, ?, ?, 0, ?)
+    ON CONFLICT (user_id) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, sent_at = excluded.sent_at`)
+    .run(user.id, sha256(`owner:${user.id}:${code}`), now + OWNER_CODE_MINUTES * 60e3, now);
+  console.log(`[owner] Owner code for ${user.email}: ${code} (expires in ${OWNER_CODE_MINUTES} minutes)`);
+}
+
+/** True if the owner code is right (and uses it up). Five wrong tries and it stops working. */
+function ownerCodeMatches(user, input) {
+  const row = db.prepare('SELECT * FROM owner_codes WHERE user_id = ?').get(user.id);
+  if (!row || row.expires_at <= Date.now() || row.attempts >= 5) return false;
+  const code = digitsOf(input);
+  const ok = code.length === 6 && crypto.timingSafeEqual(Buffer.from(sha256(`owner:${user.id}:${code}`)), Buffer.from(row.code_hash));
+  if (ok) db.prepare('UPDATE owner_codes SET expires_at = 0 WHERE user_id = ?').run(user.id);
+  else db.prepare('UPDATE owner_codes SET attempts = attempts + 1 WHERE user_id = ?').run(user.id);
+  return ok;
+}
 
 // Tiny in-memory rate limiter for auth endpoints.
 const attempts = new Map();
@@ -383,24 +354,22 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, storage });
 });
 
+const passwordError = (pw) => (pw.length < 8 ? 'Password must be at least 8 characters.' : pw.length > 200 ? 'Password is too long.' : null);
+
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   const email = cleanText(req.body?.email, 200).toLowerCase();
   const name = cleanText(req.body?.name, 80) || email.split('@')[0];
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (password.length > 200) return res.status(400).json({ error: 'Password is too long.' });
+  if (passwordError(password)) return res.status(400).json({ error: passwordError(password) });
   if (q.userByEmail.get(email)) {
-    return res.status(409).json({ error: 'An account with that email already exists. If it\'s yours, sign in, or use "Forgot password?" to get back in.' });
+    return res.status(409).json({ error: 'An account with that email already exists. If it\'s yours, sign in, or use "Forgot password?" with your recovery code.' });
   }
   const id = newId();
   q.insertUser.run(id, email, name, await bcrypt.hash(password, 12), Date.now());
-  const recoveryKey = newRecoveryKey(id);
+  const recoveryCode = newRecoveryCode(id);
   startSession(res, id);
-  const user = q.userById.get(id);
-  let delivery = null;
-  if (REQUIRE_VERIFY || isAdminEmail(email)) delivery = await issueCode(user, 'verify').catch(() => null);
-  res.status(201).json({ user: userJson(user), delivery, recoveryKey });
+  res.status(201).json({ user: userJson(q.userById.get(id)), recoveryCode });
 });
 
 app.post('/api/auth/login', rateLimit, async (req, res) => {
@@ -414,69 +383,46 @@ app.post('/api/auth/login', rateLimit, async (req, res) => {
   res.json({ user: userJson(q.userById.get(user.id)) });
 });
 
-// Email verification: a 6-digit code is emailed to the account's address.
-app.post('/api/auth/verify/send', rateLimit, authAny, async (req, res) => {
-  if (req.user.email_verified) return res.status(400).json({ error: 'Your email is already verified.' });
-  try {
-    res.json({ ok: true, delivery: await issueCode(req.user, 'verify') });
-  } catch (err) { sendError(res, err); }
-});
-
-app.post('/api/auth/verify', rateLimit, authAny, (req, res) => {
-  if (!req.user.email_verified) {
-    try { useCode(req.user, 'verify', req.body?.code); } catch (err) { return sendError(res, err); }
-    q.setVerified.run(req.user.id);
-  }
-  res.json({ user: userJson(q.userById.get(req.user.id)) });
-});
-
-// Forgot password: proving you own the email lets you set a new password. This also hands
-// an account back to its rightful owner if someone else signed up with their address.
-app.post('/api/auth/reset/send', rateLimit, async (req, res) => {
-  const email = cleanText(req.body?.email, 200).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-  const user = q.userByEmail.get(email);
-  let delivery = emailProvider ? 'sent' : 'logged';
-  if (user) {
-    try { delivery = await issueCode(user, 'reset'); } catch (err) { return sendError(res, err); }
-  }
-  // Same answer whether or not the account exists.
-  res.json({ ok: true, delivery });
-});
-
+// Forgot password: email + the account's 6-digit recovery code (or, for the owner's
+// address only, an owner code from the server log) sets a new password.
 app.post('/api/auth/reset', rateLimit, async (req, res) => {
   const email = cleanText(req.body?.email, 200).toLowerCase();
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (password.length > 200) return res.status(400).json({ error: 'Password is too long.' });
+  const code = digitsOf(req.body?.code);
   const user = q.userByEmail.get(email);
-  if (!user) return res.status(400).json({ error: 'That code has expired. Ask for a new one.' });
-  try { useCode(user, 'reset', req.body?.code); } catch (err) { return sendError(res, err); }
+  const wrong = () => res.status(400).json({ error: 'That email and code don\'t match.' });
+  if (passwordError(password)) return res.status(400).json({ error: passwordError(password) });
+  if (!user) return wrong();
+  const now = Date.now();
+  if (user.recovery_locked_until > now) {
+    const mins = Math.ceil((user.recovery_locked_until - now) / 60e3);
+    return res.status(429).json({ error: `Too many wrong codes. Try again in ${mins} minute${mins === 1 ? '' : 's'}.` });
+  }
+  const byRecovery = !!user.recovery_code && sameCode(code, user.recovery_code);
+  const byOwner = !byRecovery && isAdminEmail(email) && ownerCodeMatches(user, code);
+  if (!byRecovery && !byOwner) {
+    const fails = user.recovery_fails + 1;
+    db.prepare('UPDATE users SET recovery_fails = ?, recovery_locked_until = ? WHERE id = ?')
+      .run(fails >= RECOVERY_TRIES ? 0 : fails, fails >= RECOVERY_TRIES ? now + RECOVERY_LOCK_MS : null, user.id);
+    return wrong();
+  }
   q.updateUserPassword.run(await bcrypt.hash(password, 12), user.id);
-  q.setVerified.run(user.id);
+  db.prepare('UPDATE users SET recovery_fails = 0, recovery_locked_until = NULL WHERE id = ?').run(user.id);
+  if (byOwner) q.setVerified.run(user.id);
   q.deleteAllUserSessions.run(user.id); // sign out everyone else using the account
-  // A new recovery key too, so whoever had the account before can't use the old one.
-  const recoveryKey = newRecoveryKey(user.id);
+  // A new recovery code, so whoever had the old one (or the account) can't use it again.
+  const recoveryCode = newRecoveryCode(user.id);
   startSession(res, user.id);
-  res.json({ user: userJson(q.userById.get(user.id)), recoveryKey });
+  res.json({ user: userJson(q.userById.get(user.id)), recoveryCode });
 });
 
-// Forgot password, without email: the account's recovery key sets a new password.
-// The key is used up and a new one is returned.
-app.post('/api/auth/recover', rateLimit, async (req, res) => {
+// The owner's address only: write an owner code to the server log for a password reset.
+// Same answer for every address, so it says nothing about which accounts exist.
+app.post('/api/auth/owner-code', rateLimit, (req, res) => {
   const email = cleanText(req.body?.email, 200).toLowerCase();
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  const user = q.userByEmail.get(email);
-  if (!recoveryKeyMatches(user, req.body?.key)) {
-    return res.status(400).json({ error: 'That email and recovery key don\'t match.' });
-  }
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (password.length > 200) return res.status(400).json({ error: 'Password is too long.' });
-  q.updateUserPassword.run(await bcrypt.hash(password, 12), user.id);
-  q.deleteAllUserSessions.run(user.id);
-  const recoveryKey = newRecoveryKey(user.id);
-  startSession(res, user.id);
-  res.json({ user: userJson(q.userById.get(user.id)), recoveryKey });
+  const user = isAdminEmail(email) && q.userByEmail.get(email);
+  if (user) try { writeOwnerCode(user); } catch {}
+  res.json({ ok: true });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -486,9 +432,9 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', authAny, (req, res) => res.json({ user: userJson(req.user), verificationRequired: REQUIRE_VERIFY }));
+app.get('/api/me', auth, (req, res) => res.json({ user: userJson(req.user) }));
 
-app.patch('/api/me', authAny, async (req, res) => {
+app.patch('/api/me', auth, async (req, res) => {
   if (req.body?.name !== undefined) {
     const name = cleanText(req.body.name, 80);
     if (!name) return res.status(400).json({ error: 'Name cannot be empty.' });
@@ -507,17 +453,35 @@ app.patch('/api/me', authAny, async (req, res) => {
   res.json({ user: userJson(q.userById.get(req.user.id)) });
 });
 
-// Makes a new recovery key (the old one stops working). Needs the password.
-app.post('/api/me/recovery-key', rateLimit, authAny, async (req, res) => {
+// The signed-in account's recovery code (Settings → Recovery Code).
+app.get('/api/me/recovery-code', auth, (req, res) => res.json({ recoveryCode: recoveryCodeOf(req.user) }));
+
+// A new recovery code; the old one stops working. Needs the password.
+app.post('/api/me/recovery-code', rateLimit, auth, async (req, res) => {
   const full = q.userByEmail.get(req.user.email);
   if (!(await bcrypt.compare(String(req.body?.password || ''), full.password_hash))) {
     return res.status(400).json({ error: 'Password is incorrect.' });
   }
-  const recoveryKey = newRecoveryKey(req.user.id);
-  res.json({ user: userJson(q.userById.get(req.user.id)), recoveryKey });
+  res.json({ recoveryCode: newRecoveryCode(req.user.id) });
 });
 
-app.delete('/api/me', authAny, async (req, res) => {
+// Owner check for the About page (see "owner check" above).
+app.post('/api/owner/code', rateLimit, auth, (req, res) => {
+  if (!isAdminEmail(req.user.email)) return res.status(403).json({ error: 'Only the owner of Bindr can do this.' });
+  try { writeOwnerCode(req.user); } catch (err) { return sendError(res, err); }
+  res.json({ ok: true });
+});
+
+app.post('/api/owner/verify', rateLimit, auth, (req, res) => {
+  if (!isAdminEmail(req.user.email)) return res.status(403).json({ error: 'Only the owner of Bindr can do this.' });
+  if (!req.user.email_verified && !ownerCodeMatches(req.user, req.body?.code)) {
+    return res.status(400).json({ error: 'That code isn\'t right, or it has expired. Check the server log, or ask for a new code.' });
+  }
+  q.setVerified.run(req.user.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/me', auth, async (req, res) => {
   const full = q.userByEmail.get(req.user.email);
   if (!(await bcrypt.compare(String(req.body?.password || ''), full.password_hash))) {
     return res.status(400).json({ error: 'Password is incorrect.' });
@@ -758,9 +722,9 @@ app.put('/api/books/:id/review', auth, (req, res) => {
   if (!(rating >= 1 && rating <= 5) || Math.round(rating * 2) !== rating * 2) {
     return res.status(400).json({ error: 'Rating must be between 1.0 and 5.0 stars, in half-star steps.' });
   }
-  db.prepare(`UPDATE books SET rating = ?, review_title = ?, review_body = ?, reviewed_at = ?, updated_at = ?
+  db.prepare(`UPDATE books SET rating = ?, review_title = ?, review_body = ?, review_public = ?, reviewed_at = ?, updated_at = ?
     WHERE id = ? AND user_id = ?`).run(rating, cleanText(req.body.title, 120), cleanMultiline(req.body.body, 5000),
-    Date.now(), Date.now(), book.id, req.user.id);
+    req.body.public ? 1 : 0, Date.now(), Date.now(), book.id, req.user.id);
   res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
 });
 
@@ -770,6 +734,84 @@ app.delete('/api/books/:id/review', auth, (req, res) => {
   db.prepare(`UPDATE books SET rating = NULL, review_title = '', review_body = '', reviewed_at = NULL
     WHERE id = ? AND user_id = ?`).run(book.id, req.user.id);
   res.json({ book: publicBook(q.getBook.get(book.id, req.user.id)) });
+});
+
+// --- Book Store ----------------------------------------------------------------
+// Reviews people chose to share, grouped by book. It only ever shows a book's title,
+// author(s) and cover, plus the reviews — never the book file — so nothing is redistributed.
+// People copy "Title by Author" to find the book wherever they like to buy or borrow it.
+const storeKey = (title, author) => sha256(`${title}\n${author}`.normalize('NFKD').toLowerCase()
+  .replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}\n]+/gu, ' ').replace(/ +/g, ' ').trim()).slice(0, 20);
+
+function storeRows() {
+  return db.prepare(`SELECT b.id, b.title, b.author, b.has_cover, b.rating, b.review_title, b.review_body, b.reviewed_at,
+      b.user_id, u.name AS reviewer
+    FROM books b JOIN users u ON u.id = b.user_id
+    WHERE b.rating IS NOT NULL AND b.review_public = 1
+    ORDER BY b.reviewed_at DESC LIMIT 5000`).all();
+}
+
+/** Groups shared reviews into store items, one per book (same title and author). */
+function storeItems() {
+  const items = new Map();
+  for (const r of storeRows()) {
+    const key = storeKey(r.title, r.author);
+    let it = items.get(key);
+    if (!it) {
+      it = { key, title: r.title, author: r.author, coverId: null, total: 0, count: 0, lastReviewedAt: r.reviewed_at, rows: [], spellings: new Map() };
+      items.set(key, it);
+    }
+    if (!it.coverId && r.has_cover) it.coverId = r.id;
+    it.total += r.rating;
+    it.count++;
+    it.rows.push(r);
+    const sp = `${r.title}\n${r.author}`;
+    it.spellings.set(sp, (it.spellings.get(sp) || 0) + 1);
+  }
+  // Show the title and author as most reviewers wrote them (ties: the earliest review).
+  for (const it of items.values()) {
+    let best = 0;
+    for (const [sp, n] of it.spellings) if (n >= best) { best = n; [it.title, it.author] = sp.split('\n'); }
+  }
+  return items;
+}
+
+const storeItemJson = (it) => ({
+  key: it.key, title: it.title, author: it.author, coverId: it.coverId,
+  rating: Math.round((it.total / it.count) * 10) / 10, reviewCount: it.count, lastReviewedAt: it.lastReviewedAt,
+});
+
+app.get('/api/store', auth, (req, res) => {
+  res.json({ items: [...storeItems().values()].map(storeItemJson) });
+});
+
+app.get('/api/store/:key', auth, (req, res) => {
+  const it = storeItems().get(String(req.params.key));
+  if (!it) return res.status(404).json({ error: 'That book isn\'t in the Book Store any more.' });
+  const admin = isAdmin(req.user);
+  res.json({
+    item: storeItemJson(it),
+    reviews: it.rows.map((r) => ({
+      id: r.id, name: r.reviewer, rating: r.rating, title: r.review_title, body: r.review_body, reviewedAt: r.reviewed_at,
+      mine: r.user_id === req.user.id, canRemove: admin,
+    })),
+  });
+});
+
+// Covers of books with a shared review (only the cover image, never the book).
+app.get('/api/store/cover/:id', auth, (req, res) => {
+  const b = db.prepare('SELECT id, has_cover FROM books WHERE id = ? AND rating IS NOT NULL AND review_public = 1').get(req.params.id);
+  if (!b || !b.has_cover) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(coverPath(b.id), (err) => { if (err && !res.headersSent) res.status(404).end(); });
+});
+
+// The owner can take a review out of the Book Store (it stays in the reviewer's library).
+app.delete('/api/store/review/:id', auth, (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only the owner of Bindr can remove reviews.' });
+  const r = db.prepare('UPDATE books SET review_public = 0 WHERE id = ?').run(req.params.id);
+  if (!r.changes) return res.status(404).json({ error: 'Review not found.' });
+  res.json({ ok: true });
 });
 
 // --- highlights ------------------------------------------------------------
@@ -829,14 +871,14 @@ app.get('/api/about', auth, (req, res) => {
     content: row?.content ?? '',
     updatedAt: row?.updated_at ?? null,
     canEdit: isAdmin(req.user),
-    verifyToEdit: !req.user.email_verified && isAdminEmail(req.user.email),
+    ownerCheck: !req.user.email_verified && isAdminEmail(req.user.email), // owner, not yet checked
   });
 });
 
 app.put('/api/about', auth, (req, res) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({
-      error: isAdminEmail(req.user.email) ? 'Verify your email address to edit the About page.' : 'Only the owner of Bindr can edit the About page.',
+      error: isAdminEmail(req.user.email) ? 'Confirm you\'re the owner (with the code from the server log) to edit the About page.' : 'Only the owner of Bindr can edit the About page.',
     });
   }
   if (typeof req.body?.content !== 'string') return res.status(400).json({ error: 'Content must be text.' });
@@ -924,6 +966,5 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Email: ${emailProvider || 'not set up (codes are written to this log)'}; verification ${REQUIRE_VERIFY ? 'required' : 'optional'}`);
   console.log(`Bindr listening on :${PORT} (data dir: ${DATA_DIR})`);
 });
