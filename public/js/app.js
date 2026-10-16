@@ -998,10 +998,13 @@ function libraryHtml() {
   const books = sortBooks(state.books.filter(filter.test), state.sort);
   const list = state.libLayout === 'list';
   const uploads = filter.id === 'all' && !list ? state.uploads.map(uploadCard).join('') : '';
+  const style = list ? 'standard' : libStyle();
   const body = !state.books.length && !state.uploads.length ? emptyLibraryHtml()
-    : books.length || uploads
-      ? `<div class="${list ? 'k-list' : 'grid'}">${uploads}${books.map((b) => bookCard(b, { list })).join('')}</div>`
-      : `<div class="empty"><h2>No ${esc(filter.label.toLowerCase())} books</h2><p>Try another filter.</p></div>`;
+    : style !== 'standard'
+      ? shelfHtml(filter.id === 'all' ? state.uploads : [], books, style, filter)
+      : books.length || uploads
+        ? `<div class="${list ? 'k-list' : 'grid'}">${uploads}${books.map((b) => bookCard(b, { list })).join('')}</div>`
+        : `<div class="empty"><h2>No ${esc(filter.label.toLowerCase())} books</h2><p>Try another filter.</p></div>`;
   return `<h1 class="k-page-title">Library</h1>
     <div class="k-libbar">
       <div class="k-filters" role="tablist">${FILTERS.map((f) => `<button class="k-chip ${f.id === filter.id ? 'active' : ''}" data-filter="${f.id}" role="tab">${f.label}</button>`).join('')}</div>
@@ -1015,6 +1018,80 @@ function libraryHtml() {
     </div>
     ${body}`;
 }
+
+// ------------------------------------------------------------------ bookshelf & bookstore styles
+// Settings → Library Style turns the library's grid into a wooden bookshelf, or into the
+// face-out display shelves of a bookstore with a shelf label under every book.
+const LIB_STYLES = { standard: 'Standard', shelf: 'Bookshelf', store: 'Bookstore' };
+function libStyle() {
+  try { const v = localStorage.getItem('bindr:lib-style'); return LIB_STYLES[v] ? v : 'standard'; } catch { return 'standard'; }
+}
+
+// Bookstore section signs for each library filter.
+const STORE_SIGNS = { all: 'All Books', reading: 'Now Reading', unread: 'New Arrivals', finished: 'Finished', rated: 'Staff Picks' };
+
+/** How many books fit on one shelf at the current width. */
+function shelfColumns() {
+  const main = shell?.querySelector('.k-main');
+  const cs = main && getComputedStyle(main);
+  const inner = main ? main.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) : window.innerWidth - 36;
+  const usable = inner - 2 * 12 - 2 * 14; // side boards + shelf padding
+  const min = inner < 520 ? 84 : 118;
+  return Math.max(2, Math.min(10, Math.floor((usable + 14) / (min + 14))));
+}
+
+function shelfBook(b, style) {
+  const pct = progressPct(b);
+  const sub = b.rating ? `${starsHtml(b.rating, 9)}` : pct === null ? 'New' : pct >= 100 ? 'Finished' : `${pct}%`;
+  return {
+    book: `<div class="book shelf-book" data-id="${esc(b.id)}">
+      <button class="book-open" aria-label="Open ${esc(b.title)}${b.author ? ` by ${esc(b.author)}` : ''}" title="${esc(b.title)}">${coverHtml(b, { badges: style === 'shelf' })}</button>
+      <button class="more" aria-label="More options for ${esc(b.title)}">${ICONS.more}</button>
+      <div class="book-info" hidden><div class="book-text"><div class="book-sub"></div></div></div>
+    </div>`,
+    tag: `<div class="shelf-tag"><div class="shelf-tag-title">${esc(b.title)}</div><div class="shelf-tag-sub">${sub}</div></div>`,
+  };
+}
+
+function shelfUpload(u) {
+  return {
+    book: `<div class="book shelf-book uploading">
+      <div class="cover"><div class="placeholder">${esc(u.title)}</div>${u.coverUrl ? `<img src="${u.coverUrl}" alt="">` : ''}
+        <div class="progress upload-bar"><div style="width:${Math.round(u.progress * 100)}%"></div></div></div>
+      <div class="book-info" hidden><div class="book-text"><div class="book-sub"></div></div></div>
+    </div>`,
+    tag: `<div class="shelf-tag"><div class="shelf-tag-title">${esc(u.title)}</div><div class="shelf-tag-sub">Uploading…</div></div>`,
+  };
+}
+
+function shelfHtml(uploads, books, style, filter) {
+  const cols = shelfColumns();
+  const items = [...uploads.map(shelfUpload), ...books.map((b) => shelfBook(b, style))];
+  const rows = [];
+  for (let i = 0; i < items.length; i += cols) rows.push(items.slice(i, i + cols));
+  // A real bookcase has a few shelves even when it's nearly empty.
+  while (rows.length < (style === 'shelf' ? 3 : 2)) rows.push([]);
+  const spacer = '<div class="shelf-spacer" aria-hidden="true"><div class="cover"></div></div>';
+  const sign = style === 'store' ? `<div class="store-sign"><span>${esc(STORE_SIGNS[filter.id] || filter.label)}</span></div>` : '';
+  const empty = !items.length ? `<p class="shelf-empty">No ${esc(filter.label.toLowerCase())} books on this shelf yet.</p>` : '';
+  return `<div class="bookcase ${style}" style="--cols:${cols}" data-cols="${cols}">
+    ${sign}${empty}
+    ${rows.map((r) => `<div class="shelf-row">
+      <div class="shelf-books">${r.length ? r.map((x) => x.book).join('') : spacer}</div>
+      <div class="plank">${style === 'store' ? `<div class="shelf-tags">${r.map((x) => x.tag).join('')}</div>` : ''}</div>
+    </div>`).join('')}
+  </div>`;
+}
+
+// Re-flow the shelves when the window is resized enough to change how many books fit.
+let shelfResize = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(shelfResize);
+  shelfResize = requestAnimationFrame(() => {
+    const bc = shell && app.contains(shell) && shell.querySelector('.bookcase');
+    if (bc && Number(bc.dataset.cols) !== shelfColumns()) renderShelf();
+  });
+});
 
 function bindLibraryBar(main) {
   main.querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => {
@@ -1086,6 +1163,7 @@ function settingsHtml() {
     <div class="k-group-title">Display</div>
     <div class="k-rows">
       ${row('theme', 'Dark Mode', THEME_LABEL[uiTheme()])}
+      ${row('libstyle', 'Library Style', LIB_STYLES[libStyle()])}
       ${row('layout', 'Page Layout', LAYOUT_LABEL[layout] || 'Automatic')}
       ${row('turn', 'Page Turn Animation', TURN_LABEL[turnMode] || 'Curl')}
       ${row('filter', 'Color Filter', filterLabel())}
@@ -1123,6 +1201,20 @@ function bindSettings(main) {
       if (t) { setUiTheme(t); renderShelf(); }
     }
     if (a === 'filter') filterSheet();
+    if (a === 'libstyle') {
+      const v = await menu('Library Style', [
+        { label: 'Standard: a clean grid of covers', value: 'standard' },
+        { label: 'Bookshelf: books on wooden shelves', value: 'shelf' },
+        { label: 'Bookstore: display shelves with labels', value: 'store' },
+      ]);
+      if (v) {
+        try { localStorage.setItem('bindr:lib-style', v); } catch {}
+        // The shelves replace the grid view, so switch to it.
+        if (v !== 'standard' && state.libLayout === 'list') { state.libLayout = 'grid'; localStorage.setItem('bindr:lib-layout', 'grid'); }
+        renderShelf();
+        if (v !== 'standard') toast(`Library Style: ${LIB_STYLES[v]}. Open Library to see it.`);
+      }
+    }
     if (a === 'turn') {
       const t = await menu('Page Turn Animation', [
         { label: 'Curl: the page curls like paper', value: 'curl' },

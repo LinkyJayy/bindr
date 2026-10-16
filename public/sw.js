@@ -1,5 +1,5 @@
 // Bindr service worker: offline app shell + offline copies of opened books.
-const VERSION = 'v17';
+const VERSION = 'v18';
 const SHELL = `bindr-shell-${VERSION}`;
 const BOOKS = 'bindr-books';
 

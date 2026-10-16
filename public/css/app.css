@@ -662,3 +662,90 @@ html.cm .eraser-bar { filter: url(#bindr-cm); }
 .share-row input { width: 20px; height: 20px; margin-top: 1px; flex: none; accent-color: var(--ink); }
 .share-row b { display: block; font-size: 15px; }
 .share-row small { display: block; color: var(--muted); font-size: 13px; line-height: 1.35; margin-top: 2px; }
+
+/* ---------- Library styles: Bookshelf & Bookstore ---------- */
+.bookcase {
+  --board: 12px; --pad: 14px; --gap: 14px;
+  position: relative; margin: 4px 0 8px; border-radius: 6px; overflow: hidden;
+  border: var(--board) solid var(--case-frame); border-top-width: calc(var(--board) + 4px);
+  background-color: var(--case-back); background-image: var(--case-grain);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .28), inset 0 0 40px rgba(0, 0, 0, .35);
+}
+/* Bookshelf: walnut back panel, oak planks. */
+.bookcase.shelf {
+  --case-frame: #5a3720; --case-back: #3d2716;
+  --case-grain: repeating-linear-gradient(90deg, rgba(255, 255, 255, .025) 0 2px, transparent 2px 11px),
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, .08) 0 1px, transparent 1px 37px),
+    linear-gradient(90deg, rgba(0, 0, 0, .35), transparent 10%, transparent 90%, rgba(0, 0, 0, .35));
+  --plank-top: #a87449; --plank-mid: #85552f; --plank-bot: #5b3920;
+}
+/* Bookstore: painted cream display shelves with light wood edges. */
+.bookcase.store {
+  --case-frame: #e9e1d2; --case-back: #f7f2ea;
+  --case-grain: repeating-linear-gradient(90deg, rgba(0, 0, 0, .025) 0 1px, transparent 1px 64px),
+    linear-gradient(90deg, rgba(0, 0, 0, .06), transparent 8%, transparent 92%, rgba(0, 0, 0, .06));
+  --plank-top: #f0dcb8; --plank-mid: #ddbf8f; --plank-bot: #c4a06b;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .14), inset 0 0 30px rgba(0, 0, 0, .06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-ui="light"]) .bookcase.store { --case-frame: #3a332b; --case-back: #262019; --plank-top: #a07e52; --plank-mid: #85663f; --plank-bot: #634a2c; }
+}
+:root[data-ui="dark"] .bookcase.store { --case-frame: #3a332b; --case-back: #262019; --plank-top: #a07e52; --plank-mid: #85663f; --plank-bot: #634a2c; }
+
+.shelf-row { position: relative; }
+.shelf-books {
+  display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: var(--gap);
+  align-items: end; padding: 18px var(--pad) 0;
+}
+.plank {
+  position: relative; z-index: 1; height: 16px;
+  background: linear-gradient(var(--plank-top), var(--plank-mid) 35%, var(--plank-bot));
+  box-shadow: 0 7px 10px -2px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .25);
+}
+.shelf-row:last-child .plank { margin-bottom: 0; }
+
+/* Books standing on the shelf: a spine crease, a little depth and a shadow on the back panel. */
+.shelf-book { position: relative; }
+.shelf-book .cover, .shelf-spacer .cover { border: 0; border-radius: 1px 3px 3px 1px; }
+.shelf-book .cover { box-shadow: 4px 0 8px -1px rgba(0, 0, 0, .55), 0 0 0 1px rgba(0, 0, 0, .25); }
+.shelf-book .cover::before {
+  content: ""; position: absolute; z-index: 1; inset: 0 auto 0 0; width: 8%; pointer-events: none;
+  background: linear-gradient(90deg, rgba(0, 0, 0, .35), rgba(255, 255, 255, .22) 45%, rgba(0, 0, 0, .12) 70%, transparent);
+}
+.shelf-book .cover .placeholder { background: #f3ede1; color: #2a2118; border-color: #c9b99d; }
+.shelf-spacer { visibility: hidden; }
+.shelf-book .more {
+  position: absolute; z-index: 2; bottom: 6px; right: 6px; margin: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: rgba(255, 255, 255, .88); color: #111; box-shadow: 0 1px 4px rgba(0, 0, 0, .35); opacity: .9;
+}
+.shelf-book .more svg { width: 16px; height: 16px; }
+.shelf-book .book-open { transition: transform .15s ease; }
+.shelf-book .book-open:active { transform: translateY(-4px); }
+@media (hover: hover) { .shelf-book .book-open:hover { transform: translateY(-4px); } }
+
+/* Bookstore: a sign over the shelves and a label clipped to the shelf edge under each book. */
+.bookcase.store .shelf-books { gap: var(--gap); padding-top: 22px; }
+.bookcase.store .shelf-book .cover { box-shadow: 0 6px 10px -3px rgba(0, 0, 0, .35), 0 0 0 1px rgba(0, 0, 0, .12); transform: perspective(600px) rotateX(4deg); transform-origin: bottom; }
+.bookcase.store .plank { height: auto; min-height: 16px; padding: 6px var(--pad) 7px; }
+.shelf-tags { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: var(--gap); }
+.shelf-tag {
+  background: #fffdf8; color: #1d1a16; border-radius: 2px; padding: 3px 6px 4px; text-align: center; min-width: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .25); border-top: 3px solid #1f5d4c;
+}
+.shelf-tag-title { font: 700 11px/1.25 Georgia, "Times New Roman", serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shelf-tag-sub { font-size: 10px; color: #5c554b; margin-top: 1px; min-height: 12px; display: flex; justify-content: center; }
+.shelf-tag-sub .stars { --star: #1d1a16; }
+.store-sign {
+  display: flex; justify-content: center; padding: 14px 12px 4px;
+}
+.store-sign span {
+  display: inline-block; padding: 8px 26px; border-radius: 4px; background: #1f5d4c; color: #f6e7c1;
+  font: italic 700 22px/1.1 Georgia, "Times New Roman", serif; letter-spacing: .02em;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, .3), inset 0 0 0 2px rgba(246, 231, 193, .55), inset 0 0 0 5px #1f5d4c, inset 0 0 0 6px rgba(246, 231, 193, .35);
+}
+.shelf-empty { margin: 12px 16px 0; text-align: center; font-size: 14px; color: var(--case-empty, #e9dccb); }
+.bookcase.store .shelf-empty { color: #6b6156; }
+@media (max-width: 520px) {
+  .bookcase { --board: 9px; --pad: 10px; --gap: 10px; }
+  .store-sign span { font-size: 19px; padding: 7px 20px; }
+}
